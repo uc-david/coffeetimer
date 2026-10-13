@@ -1,0 +1,927 @@
+/**
+ * @file ui.cpp
+ * @brief Implementierung der Display-Oberfläche.
+ */
+#include "ui.h"
+
+#include <M5Unified.h>
+
+#include <algorithm>
+
+#include "app.h"
+#include "battery.h"
+#include "net_manager.h"
+#include "scale.h"
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Farben (RGB565) und Layout
+// ---------------------------------------------------------------------------
+constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+constexpr uint16_t kColBg     = rgb(27, 20, 17);
+constexpr uint16_t kColCard   = rgb(42, 32, 27);
+constexpr uint16_t kColLine   = rgb(61, 47, 39);
+constexpr uint16_t kColText   = rgb(243, 235, 228);
+constexpr uint16_t kColMuted  = rgb(179, 161, 151);
+constexpr uint16_t kColAccent = rgb(224, 164, 88);
+constexpr uint16_t kColRun    = rgb(255, 179, 71);
+constexpr uint16_t kColOk     = rgb(95, 191, 119);
+constexpr uint16_t kColWarn   = rgb(230, 180, 80);
+constexpr uint16_t kColErr    = rgb(229, 96, 90);
+constexpr uint16_t kColDark   = rgb(42, 26, 10);
+
+constexpr int kW = 320;
+constexpr int kH = 240;
+constexpr int kBtnY = 204;
+constexpr int kBtnH = 34;
+
+/// UTF-8-fähige Schriften (Umlaute) und 7-Segment-Schrift für den Timer.
+const lgfx::IFont* kFontSmall = &fonts::efontJA_12;
+const lgfx::IFont* kFontText  = &fonts::efontJA_16;
+const lgfx::IFont* kFontBold  = &fonts::efontJA_16_b;
+const lgfx::IFont* kFontTimer = &fonts::Font7;
+
+enum class Screen { Main, TeachSelect, Teach, Info, Settings };
+
+/// Touch-Schaltfläche.
+struct Button {
+  int16_t x, y, w, h;
+  const char* label;
+  uint16_t color;
+  uint16_t textColor;
+  bool visible;
+
+  bool hit(int px, int py) const {
+    return visible && px >= x && px < x + w && py >= y && py < y + h;
+  }
+};
+
+// Buttons je Screen (Positionen fest, Sichtbarkeit dynamisch)
+Button btnTeach   {  4, kBtnY, 100, kBtnH, "TEACH",       kColAccent, kColDark, true};
+Button btnReset   {110, kBtnY, 100, kBtnH, "RESET",       kColLine,   kColText, true};
+Button btnInfo    {216, kBtnY, 100, kBtnH, "INFO",        kColLine,   kColText, true};
+
+Button btnLearnPump {  4, kBtnY, 100, kBtnH, "PUMPE",     kColAccent, kColDark, true};
+Button btnLearnNoise{110, kBtnY, 100, kBtnH, "STÖRGER.",  kColLine,   kColText, true};
+
+Button btnFinish  {  4, kBtnY, 100, kBtnH, "FERTIG",      kColOk,     kColDark, false};
+Button btnSave    {  4, kBtnY, 100, kBtnH, "SPEICHERN",   kColOk,     kColDark, false};
+Button btnAdd     {110, kBtnY, 100, kBtnH, "ERGÄNZEN",    kColAccent, kColDark, false};
+Button btnRetry   {110, kBtnY, 100, kBtnH, "WIEDERHOLEN", kColLine,   kColText, false};
+Button btnCancel  {216, kBtnY, 100, kBtnH, "ABBRECHEN",   kColErr,    kColText, true};
+
+// Info-Screen: vier schmalere Buttons
+Button btnProfile {  4, kBtnY,  75, kBtnH, "EINST.",      kColAccent, kColDark, true};
+Button btnSensDown{ 83, kBtnY,  75, kBtnH, "EMPF -",      kColLine,   kColText, true};
+Button btnSensUp  {162, kBtnY,  75, kBtnH, "EMPF +",      kColLine,   kColText, true};
+Button btnInfoBack{241, kBtnY,  75, kBtnH, "ZURÜCK",      kColLine,   kColText, true};
+Button btnBack    {216, kBtnY, 100, kBtnH, "ZURÜCK",      kColAccent, kColDark, true};
+
+M5Canvas canvas(&M5.Display);
+Screen screen = Screen::Main;
+StatusSnapshot snap;  // groß -> statisch statt auf dem Stack
+uint32_t lastDrawMs = 0;
+
+// ---------------------------------------------------------------------------
+// Zeichen-Hilfen
+// ---------------------------------------------------------------------------
+
+void drawButton(const Button& b) {
+  if (!b.visible) return;
+  canvas.fillRoundRect(b.x, b.y, b.w, b.h, 8, b.color);
+  canvas.setFont(kFontBold);
+  canvas.setTextColor(b.textColor);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  canvas.drawString(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+}
+
+/**
+ * Zeichnet einen Balken mit optionaler Schwellenmarke.
+ * @param value      Füllstand 0..1
+ * @param threshold  Position der Marke 0..1, <0 = keine Marke
+ */
+void drawBar(int x, int y, int w, int h, float value, float threshold, uint16_t fill) {
+  canvas.fillRoundRect(x, y, w, h, h / 2, kColLine);
+  const int fw = static_cast<int>(constrain(value, 0.0f, 1.0f) * w);
+  if (fw > 0) canvas.fillRoundRect(x, y, fw, h, h / 2, fill);
+  if (threshold >= 0.0f) {
+    const int tx = x + static_cast<int>(constrain(threshold, 0.0f, 1.0f) * (w - 2));
+    canvas.fillRect(tx, y - 3, 2, h + 6, kColText);
+  }
+}
+
+/**
+ * Gibt Text mit Wortumbruch aus.
+ * @return y-Position unterhalb der letzten Zeile
+ */
+int drawWrapped(const char* text, int x, int y, int w, int lineH, int maxY) {
+  canvas.setTextDatum(textdatum_t::top_left);
+  String line, word;
+  const char* p = text;
+  auto flush = [&]() {
+    if (y + lineH <= maxY) canvas.drawString(line, x, y);
+    y += lineH;
+    line = "";
+  };
+  while (true) {
+    const char c = *p;
+    if (c == ' ' || c == '\0') {
+      if (!word.isEmpty()) {
+        const String candidate = line.isEmpty() ? word : line + " " + word;
+        if (canvas.textWidth(candidate) > w && !line.isEmpty()) {
+          flush();
+          line = word;
+        } else {
+          line = candidate;
+        }
+        word = "";
+      }
+      if (c == '\0') break;
+    } else {
+      word += c;
+    }
+    ++p;
+  }
+  if (!line.isEmpty()) flush();
+  return y;
+}
+
+/**
+ * Akkusymbol mit Prozentanzeige, rechtsbündig an Position right.
+ * Farbe: grün > 50 %, gelb > 20 %, sonst rot; beim Laden mit Blitz.
+ * @return linke x-Kante der Anzeige (für weitere Elemente links davon)
+ */
+int drawBattery(int right, int cy) {
+  const int lvl = battery::level();
+  const bool chg = battery::charging();
+
+  // Prozenttext
+  char txt[8];
+  if (lvl >= 0) {
+    snprintf(txt, sizeof(txt), "%d%%", lvl);
+  } else {
+    snprintf(txt, sizeof(txt), "--%%");
+  }
+  canvas.setFont(kFontSmall);
+  canvas.setTextColor(kColText);
+  canvas.setTextDatum(textdatum_t::middle_right);
+  canvas.drawString(txt, right, cy);
+  const int textLeft = right - canvas.textWidth(txt);
+
+  // Symbol: Gehäuse 22x11 + Kontakt-Nase
+  constexpr int bw = 22, bh = 11;
+  const int bx = textLeft - 4 - bw - 2;
+  const int by = cy - bh / 2;
+  const uint16_t col = lvl < 0 ? kColMuted : (lvl > 50 ? kColOk : (lvl > 20 ? kColWarn : kColErr));
+  canvas.drawRect(bx, by, bw, bh, kColText);
+  canvas.fillRect(bx + bw, cy - 2, 2, 5, kColText);
+  if (lvl > 0) {
+    const int fill = (bw - 4) * lvl / 100;
+    canvas.fillRect(bx + 2, by + 2, fill < 1 ? 1 : fill, bh - 4, col);
+  }
+  if (chg) {
+    // Blitz als Ladesymbol über dem Gehäuse
+    const int mx = bx + bw / 2;
+    canvas.fillTriangle(mx + 1, by - 1, mx - 4, cy + 1, mx, cy + 1, kColAccent);
+    canvas.fillTriangle(mx - 1, by + bh + 1, mx + 4, cy - 1, mx, cy - 1, kColAccent);
+  }
+  return bx;
+}
+
+/// Kopfzeile mit Titel, Netzwerkstatus und Akkuanzeige.
+void drawHeader() {
+  canvas.fillRect(0, 0, kW, 26, kColCard);
+  canvas.setFont(kFontBold);
+  canvas.setTextColor(kColAccent);
+  canvas.setTextDatum(textdatum_t::middle_left);
+  canvas.drawString("Coffee Timer", 8, 13);
+
+  String netTxt;
+  uint16_t col = kColMuted;
+  if (net::connected()) {
+    netTxt = net::ip();
+    col = kColOk;
+  } else if (net::apActive()) {
+    netTxt = "AP " + net::ip();
+    col = kColWarn;
+  } else {
+    netTxt = "WLAN …";
+  }
+  // Akku ganz rechts, Netzwerk links daneben
+  const int batteryLeft = drawBattery(kW - 6, 13);
+  canvas.setFont(kFontSmall);
+  canvas.setTextColor(col);
+  canvas.setTextDatum(textdatum_t::middle_right);
+  canvas.drawString(netTxt, batteryLeft - 8, 13);
+}
+
+/// Sekunden mit einer Nachkommastelle, z. B. "27.4".
+String formatSeconds(uint32_t ms) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu.%lu", (unsigned long)(ms / 1000), (unsigned long)((ms % 1000) / 100));
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Screens
+// ---------------------------------------------------------------------------
+
+void drawMain() {
+  // --- Statuszeile -----------------------------------------------------------
+  const char* statusTxt;
+  uint16_t statusCol;
+  if (!snap.lastSaveOk) {
+    statusTxt = "Speichern fehlgeschlagen!";
+    statusCol = kColErr;
+  } else if (snap.detector.pumpOn) {
+    statusTxt = "Pumpe läuft";
+    statusCol = kColRun;
+  } else if (snap.detector.rejected) {
+    statusTxt = "Störgeräusch – ignoriert";
+    statusCol = kColMuted;
+  } else {
+    statusTxt = "Bereit";
+    statusCol = kColOk;
+  }
+  canvas.fillCircle(14, 42, 5, statusCol);
+  canvas.setFont(kFontText);
+  canvas.setTextColor(statusCol);
+  canvas.setTextDatum(textdatum_t::middle_left);
+  canvas.drawString(statusTxt, 26, 42);
+
+  // Aktives Profil rechts in der Statuszeile (gekürzt, falls zu lang)
+  {
+    const int left = 26 + canvas.textWidth(statusTxt) + 12;
+    canvas.setFont(kFontSmall);
+    String prof = "P" + String(snap.activeSlot + 1) + " " + snap.profileName;
+    if (snap.profileDefault) prof += " (Std.)";
+    while (prof.length() > 3 && canvas.textWidth(prof) > kW - 8 - left) {
+      prof.remove(prof.length() - 1);
+    }
+    canvas.setTextColor(kColMuted);
+    canvas.setTextDatum(textdatum_t::middle_right);
+    canvas.drawString(prof, kW - 8, 42);
+  }
+
+  // --- Großer Timer ------------------------------------------------------------
+  canvas.setFont(kFontTimer);
+  canvas.setTextSize(2);
+  canvas.setTextColor(snap.timerRunning ? kColRun : kColText);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  canvas.drawString(formatSeconds(snap.timerMs), kW / 2 - 10, 100);
+  canvas.setTextSize(1);
+  canvas.setFont(kFontBold);
+  canvas.setTextColor(kColMuted);
+  canvas.setTextDatum(textdatum_t::bottom_left);
+  canvas.drawString("s", kW / 2 + 128, 145);
+
+  // --- Waage (optional) bzw. letzte Bezüge ---------------------------------------
+  if (snap.scaleEnabled) {
+    // Gewicht und (während des Bezugs) Durchfluss; Antippen = Tara
+    char buf[40];
+    if (!isnan(snap.scaleWeight)) {
+      if (snap.timerRunning) {
+        snprintf(buf, sizeof(buf), "%.1f g   %.1f g/s", snap.scaleWeight, snap.scaleFlow);
+      } else {
+        snprintf(buf, sizeof(buf), "%.1f g", snap.scaleWeight);
+      }
+      canvas.setFont(kFontBold);
+      canvas.setTextColor(kColText);
+    } else {
+      snprintf(buf, sizeof(buf), "Waage %s", snap.scaleState);
+      canvas.setFont(kFontSmall);
+      canvas.setTextColor(kColMuted);
+    }
+    canvas.setTextDatum(textdatum_t::middle_center);
+    canvas.drawString(buf, kW / 2, 155);
+  } else if (snap.historyCount > 0) {
+    String hist = "Zuletzt:";
+    for (size_t i = 0; i < snap.historyCount && i < 4; ++i) {
+      hist += (i ? " | " : " ") + formatSeconds(snap.history[i].durationMs);
+    }
+    hist += " s";
+    canvas.setFont(kFontSmall);
+    canvas.setTextColor(kColMuted);
+    canvas.setTextDatum(textdatum_t::middle_center);
+    canvas.drawString(hist, kW / 2, 156);
+  }
+
+  // --- Live-Messwerte ----------------------------------------------------------
+  const DetectorStatus& d = snap.detector;
+  const DetectorSettings& st = snap.settings;
+  canvas.setFont(kFontSmall);
+  canvas.setTextColor(kColMuted);
+  canvas.setTextDatum(textdatum_t::middle_left);
+  // Balken: Pegel und die für diese Pumpe maßgeblichen Kriterien
+  // (Takt + Rhythmus-Form bei Vibrationspumpe, Klangmuster bei Rotationspumpe).
+  // Grün = Kriterium erfüllt; weiße Marke = Schwelle.
+  struct Meter { const char* label; float value; float threshold; };
+  const FrameScores& sc = d.scores;
+  Meter meters[3] = {{"Pegel", sc.levelRatio, st.levelThreshold}};
+  int count = 1;
+  if (d.periodic) {
+    meters[count++] = {"Takt", sc.periodicity, st.periodicityThreshold};
+    meters[count++] = {"Rhythmus", sc.rhythm, snap.profileRhythmTh};
+  } else {
+    meters[count++] = {"Muster", sc.similarity, st.similarityThreshold};
+  }
+  const int step = count == 3 ? 12 : 15;
+  int y = count == 3 ? 165 : 168;
+  for (int i = 0; i < count; ++i, y += step) {
+    canvas.drawString(meters[i].label, 8, y + 4);
+    drawBar(64, y + 1, 248, 6, meters[i].value, meters[i].threshold,
+            meters[i].value >= meters[i].threshold ? kColOk : kColAccent);
+  }
+
+  drawButton(btnTeach);
+  drawButton(btnReset);
+  drawButton(btnInfo);
+}
+
+void drawTeach() {
+  const bool done = snap.teachPhase == TeachPhase::Done;
+
+  if (!done) {
+    // --- Aufnahme läuft ------------------------------------------------------
+    canvas.setFont(kFontBold);
+    canvas.setTextColor(kColAccent);
+    canvas.setTextDatum(textdatum_t::top_left);
+    canvas.drawString(snap.teachMode == TeachMode::Noise ? "TEACH: STÖRGERÄUSCH" : "TEACH: PUMPE",
+                      8, 34);
+
+    canvas.setFont(kFontText);
+    canvas.setTextColor(kColText);
+    drawWrapped(snap.teachInstruction, 8, 58, kW - 16, 20, 125);
+
+    drawBar(8, 130, kW - 16, 10, snap.teachProgress, -1.0f, kColAccent);
+
+    // Mikrofonpegel -90..0 dBFS; Marke = Auslöseschwelle für "Pumpe läuft"
+    const bool showBg = snap.teachPhase == TeachPhase::WaitPump ||
+                        snap.teachPhase == TeachPhase::RecordPump;
+    const float trigger = snap.teachBgDb + cfg::kTeachPumpTriggerDb;
+    auto norm = [](float db) { return (db + 90.0f) / 90.0f; };
+    drawBar(8, 160, kW - 16, 12, norm(snap.teachLiveDb), showBg ? norm(trigger) : -1.0f,
+            showBg && snap.teachLiveDb >= trigger ? kColOk : kColAccent);
+
+    char buf[64];
+    if (snap.teachPhase == TeachPhase::RecordPump) {
+      snprintf(buf, sizeof(buf), "Aufnahme %.1f s  |  Pegel %.1f dB",
+               snap.teachRecordedMs / 1000.0f, snap.teachLiveDb);
+    } else if (showBg) {
+      snprintf(buf, sizeof(buf), "Pegel %.1f dB  (Hintergrund %.1f dB)", snap.teachLiveDb, snap.teachBgDb);
+    } else {
+      snprintf(buf, sizeof(buf), "Pegel %.1f dB", snap.teachLiveDb);
+    }
+    canvas.setFont(kFontSmall);
+    canvas.setTextColor(kColMuted);
+    canvas.setTextDatum(textdatum_t::top_left);
+    canvas.drawString(buf, 8, 178);
+  } else {
+    // --- Ergebnis ---------------------------------------------------------------
+    const TeachResult& r = snap.teachResult;
+    const char* title;
+    uint16_t col;
+    switch (r.quality) {
+      case TeachQuality::Ok:      title = "Aufnahme OK";             col = kColOk;   break;
+      case TeachQuality::Warning: title = "OK mit Einschränkungen"; col = kColWarn; break;
+      default:                    title = "Nicht verwendbar";        col = kColErr;  break;
+    }
+    canvas.fillRoundRect(8, 32, kW - 16, 28, 6, col);
+    canvas.setFont(kFontBold);
+    canvas.setTextColor(kColDark);
+    canvas.setTextDatum(textdatum_t::middle_left);
+    canvas.drawString(title, 16, 46);
+    char score[24];
+    snprintf(score, sizeof(score), "%d/100", r.score);
+    canvas.setTextDatum(textdatum_t::middle_right);
+    canvas.drawString(score, kW - 16, 46);
+
+    // Begründungen (so viele wie Platz haben)
+    canvas.setFont(kFontSmall);
+    canvas.setTextColor(kColText);
+    int y = 66;
+    const int maxY = kBtnY - 4;
+    for (uint8_t i = 0; i < r.messageCount && y < maxY - 13; ++i) {
+      canvas.fillCircle(11, y + 6, 2, col);
+      y = drawWrapped(r.messages[i], 18, y, kW - 26, 14, maxY) + 3;
+    }
+    if (y >= maxY - 13 && r.messageCount > 1) {
+      canvas.setTextColor(kColMuted);
+      canvas.setTextDatum(textdatum_t::bottom_right);
+      canvas.drawString("Details: Webseite", kW - 8, maxY);
+    }
+  }
+
+  // Buttons je nach Phase
+  // Ergebnis verwendbar: neues Profil speichern bzw. bestehendes ersetzen
+  // oder ergänzen (z. B. Leerbezug + echter Bezug).
+  // Störgeräusch: nur speichern (wird an die Liste angehängt).
+  const bool usable = done && snap.teachResult.quality != TeachQuality::Error;
+  const bool pumpMode = snap.teachMode == TeachMode::Pump;
+  btnFinish.visible = snap.teachPhase == TeachPhase::RecordPump;
+  btnSave.visible = usable;
+  const bool learned = snap.profileValid && !snap.profileDefault;
+  btnSave.label = pumpMode && learned ? "ERSETZEN" : "SPEICHERN";
+  btnAdd.visible = usable && pumpMode && learned;
+  btnRetry.visible = done && !btnAdd.visible;
+  btnCancel.label = done ? "VERWERFEN" : "ABBRECHEN";
+  drawButton(btnFinish);
+  drawButton(btnSave);
+  drawButton(btnAdd);
+  drawButton(btnRetry);
+  drawButton(btnCancel);
+}
+
+void drawTeachSelect() {
+  canvas.setFont(kFontBold);
+  canvas.setTextColor(kColAccent);
+  canvas.setTextDatum(textdatum_t::top_left);
+  canvas.drawString("Was soll gelernt werden?", 8, 34);
+
+  canvas.setFont(kFontText);
+  canvas.setTextColor(kColText);
+  int y = drawWrapped("PUMPE: Hintergrund aufnehmen, dann einen normalen Bezug machen.",
+                      8, 60, kW - 16, 20, 195);
+  drawWrapped(snap.profileValid
+                  ? "STÖRGERÄUSCH: z. B. Mühle laufen lassen – wird künftig ignoriert."
+                  : "STÖRGERÄUSCH: erst möglich, wenn die Pumpe eingelernt ist.",
+              8, y + 8, kW - 16, 20, 195);
+
+  btnLearnNoise.visible = snap.profileValid;
+  drawButton(btnLearnPump);
+  drawButton(btnLearnNoise);
+  drawButton(btnBack);
+}
+
+void drawInfo() {
+  canvas.setFont(kFontText);
+  canvas.setTextDatum(textdatum_t::top_left);
+  char buf[96];
+  int y = 34;
+  auto line = [&](const char* label, const String& value, uint16_t col = kColText) {
+    canvas.setTextColor(kColMuted);
+    canvas.drawString(label, 8, y);
+    canvas.setTextColor(col);
+    canvas.drawString(value, 100, y);
+    y += 20;
+  };
+
+  line("WLAN", net::apActive() ? "AP " + net::networkName()
+                                : (net::connected() ? net::networkName() : String("verbinde …")),
+       net::connected() ? kColOk : kColWarn);
+  line("Adresse", "http://" + net::ip());
+
+  snprintf(buf, sizeof(buf), "%u: %s", snap.activeSlot + 1, snap.profileName);
+  line("Profil", buf, snap.profileDefault ? kColWarn : kColOk);
+  if (snap.profileDefault) {
+    line("Pumpe", "Standard (ohne Teach)", kColWarn);
+  } else {
+    if (snap.profilePeriodHz > 0.0f) {
+      snprintf(buf, sizeof(buf), "Takt %.0f Hz, Q %.0f, %u Muster", snap.profilePeriodHz,
+               snap.profileQuality, snap.profileTemplates);
+    } else {
+      snprintf(buf, sizeof(buf), "ohne Takt, Q %.0f, %u Muster", snap.profileQuality,
+               snap.profileTemplates);
+    }
+    line("Pumpe", buf);
+  }
+
+  snprintf(buf, sizeof(buf), "Störger. %u  |  Mikro %ux%s", snap.noiseCount, snap.micGain,
+           snap.clipRatio > 0.001f ? " ÜBERST.!" : "");
+  line("Sonst.", buf, snap.clipRatio > 0.001f ? kColErr : kColText);
+  snprintf(buf, sizeof(buf), "%.0f %%  (Pegel-Schwelle)", snap.settings.levelThreshold * 100.0f);
+  line("Empfindl.", buf);
+  if (snap.profilePeriodHz > 0.0f) {
+    snprintf(buf, sizeof(buf), "Takt %.0f %%", snap.settings.periodicityThreshold * 100.0f);
+  } else {
+    snprintf(buf, sizeof(buf), "Muster %.0f %%", snap.settings.similarityThreshold * 100.0f);
+  }
+  line("Schwelle", buf);
+  snprintf(buf, sizeof(buf), "Ein %u ms / Aus %u ms", snap.settings.onDelayMs, snap.settings.offDelayMs);
+  line("Verzög.", buf);
+
+  drawButton(btnProfile);
+  drawButton(btnSensDown);
+  drawButton(btnSensUp);
+  drawButton(btnInfoBack);
+}
+
+// ---------------------------------------------------------------------------
+// Einstellungen am Display (alle Werte der Webseite, mit -/+ änderbar)
+// ---------------------------------------------------------------------------
+
+/// Einträge des Einstellungs-Screens.
+enum class SetItem {
+  Profile, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
+  Scale, ScaleAutoTare, ScaleTimer, ScaleTare,
+  Noise, Template, ClearHistory, ResetProfile
+};
+
+constexpr int kSetRowY = 30;                                ///< erste Zeile
+constexpr int kSetRowH = 22;                                ///< Zeilenhöhe
+constexpr int kSetRows = 7;                                 ///< Zeilen je Seite
+constexpr int kSetPagerY = kSetRowY + kSetRows * kSetRowH;  ///< Blätter-Leiste
+constexpr int kMaxSetItems = 16;
+
+Button btnMinus  {  4, kBtnY, 75, kBtnH, "-",       kColLine,   kColText, true};
+Button btnPlus   { 83, kBtnY, 75, kBtnH, "+",       kColLine,   kColText, true};
+Button btnAction {162, kBtnY, 75, kBtnH, "LÖSCHEN", kColErr,    kColText, false};
+Button btnSetBack{241, kBtnY, 75, kBtnH, "ZURÜCK",  kColAccent, kColDark, true};
+
+int setSelected = 0;          ///< gewählter Eintrag
+int setPage = 0;              ///< aktuelle Seite
+uint8_t noiseSel = 0;         ///< gewähltes Störgeräusch (zum Löschen)
+uint8_t templateSel = 0;      ///< gewähltes Klangmuster (zum Löschen)
+SetItem confirmItem = SetItem::Profile;
+uint32_t confirmUntil = 0;    ///< Löschen erst nach zweitem Tippen bis zu diesem Zeitpunkt
+
+/// Stufen der Mikrofon-Verstärkung (feiner im unteren Bereich).
+constexpr uint8_t kGainSteps[] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
+
+/// Sichtbare Einträge – abhängig vom Profil (z. B. Takt nur bei Pumpe mit Takt).
+int buildItems(SetItem* out) {
+  int n = 0;
+  out[n++] = SetItem::Profile;
+  out[n++] = SetItem::Level;
+  if (snap.profilePeriodHz > 0.0f) {
+    out[n++] = SetItem::Periodicity;
+  } else if (!snap.profileDefault) {
+    out[n++] = SetItem::Similarity;
+  }
+  out[n++] = SetItem::OnDelay;
+  out[n++] = SetItem::OffDelay;
+  out[n++] = SetItem::MinShot;
+  out[n++] = SetItem::MicGain;
+  out[n++] = SetItem::Scale;
+  if (snap.scaleEnabled) {
+    out[n++] = SetItem::ScaleAutoTare;
+    out[n++] = SetItem::ScaleTimer;
+    out[n++] = SetItem::ScaleTare;
+  }
+  if (snap.noiseCount > 0) out[n++] = SetItem::Noise;
+  if (!snap.profileDefault && snap.profileTemplates > 1) out[n++] = SetItem::Template;
+  out[n++] = SetItem::ClearHistory;
+  out[n++] = SetItem::ResetProfile;
+  return n;
+}
+
+const char* itemLabel(SetItem it) {
+  switch (it) {
+    case SetItem::Profile:      return "Profil";
+    case SetItem::Level:        return "Pegel-Schwelle";
+    case SetItem::Similarity:   return "Muster-Schwelle";
+    case SetItem::Periodicity:  return "Takt-Schwelle";
+    case SetItem::OnDelay:      return "Einschaltverz.";
+    case SetItem::OffDelay:     return "Ausschaltverz.";
+    case SetItem::MinShot:      return "Mindestdauer";
+    case SetItem::MicGain:      return "Mikrofon";
+    case SetItem::Scale:        return "Waage";
+    case SetItem::ScaleAutoTare:return "Auto-Tara";
+    case SetItem::ScaleTimer:   return "Waagen-Timer";
+    case SetItem::ScaleTare:    return "Waage tarieren";
+    case SetItem::Noise:        return "Störgeräusch";
+    case SetItem::Template:     return "Klangmuster";
+    case SetItem::ClearHistory: return "Historie";
+    case SetItem::ResetProfile: return "Profil zurücks.";
+  }
+  return "";
+}
+
+/// Eintrag hat einen mit -/+ änderbaren Wert?
+bool hasValue(SetItem it) {
+  return it != SetItem::ClearHistory && it != SetItem::ResetProfile && it != SetItem::ScaleTare;
+}
+
+/// Eintrag hat eine Aktion (Löschen/Zurücksetzen)?
+bool hasAction(SetItem it) {
+  return it == SetItem::Noise || it == SetItem::Template || it == SetItem::ClearHistory ||
+         it == SetItem::ResetProfile || it == SetItem::ScaleTare;
+}
+
+/// Aktionen, die ohne Sicherheitsabfrage sofort ausgeführt werden.
+bool isHarmless(SetItem it) { return it == SetItem::ScaleTare; }
+
+String itemValue(SetItem it) {
+  const DetectorSettings& st = snap.settings;
+  char buf[40];
+  switch (it) {
+    case SetItem::Profile:
+      snprintf(buf, sizeof(buf), "%u: %.14s", snap.activeSlot + 1, snap.profileName);
+      break;
+    case SetItem::Level:       snprintf(buf, sizeof(buf), "%.0f %%", st.levelThreshold * 100.0f); break;
+    case SetItem::Similarity:  snprintf(buf, sizeof(buf), "%.0f %%", st.similarityThreshold * 100.0f); break;
+    case SetItem::Periodicity: snprintf(buf, sizeof(buf), "%.0f %%", st.periodicityThreshold * 100.0f); break;
+    case SetItem::OnDelay:     snprintf(buf, sizeof(buf), "%u ms", st.onDelayMs); break;
+    case SetItem::OffDelay:    snprintf(buf, sizeof(buf), "%.1f s", st.offDelayMs / 1000.0f); break;
+    case SetItem::MinShot:     snprintf(buf, sizeof(buf), "%.0f s", st.minShotSeconds); break;
+    case SetItem::MicGain:     snprintf(buf, sizeof(buf), "%ux", snap.micGain); break;
+    case SetItem::Scale:
+      snprintf(buf, sizeof(buf), "%s", snap.scaleEnabled ? snap.scaleState : "aus");
+      break;
+    case SetItem::ScaleAutoTare: snprintf(buf, sizeof(buf), scale::config().autoTare ? "an" : "aus"); break;
+    case SetItem::ScaleTimer:    snprintf(buf, sizeof(buf), scale::config().syncTimer ? "an" : "aus"); break;
+    case SetItem::ScaleTare:
+      if (isnan(snap.scaleWeight)) {
+        snprintf(buf, sizeof(buf), "-");
+      } else {
+        snprintf(buf, sizeof(buf), "%.1f g", snap.scaleWeight);
+      }
+      break;
+    case SetItem::Noise:       snprintf(buf, sizeof(buf), "%u von %u", noiseSel + 1, snap.noiseCount); break;
+    case SetItem::Template:
+      snprintf(buf, sizeof(buf), "%u von %u", templateSel + 1, snap.profileTemplates);
+      break;
+    case SetItem::ClearHistory: snprintf(buf, sizeof(buf), "%u Einträge", (unsigned)snap.historyCount); break;
+    case SetItem::ResetProfile: snprintf(buf, sizeof(buf), snap.profileDefault ? "Standard" : "gelernt"); break;
+  }
+  return buf;
+}
+
+/// Wert eines Eintrags um eine Stufe ändern (dir = -1 / +1).
+void adjustItem(SetItem it, int dir) {
+  DetectorSettings s = app.settings();
+  switch (it) {
+    case SetItem::Profile:
+      app.cmdSelectSlot((snap.activeSlot + cfg::kProfileSlots + dir) % cfg::kProfileSlots);
+      return;
+    case SetItem::Level:       s.levelThreshold += 0.05f * dir; break;
+    case SetItem::Similarity:  s.similarityThreshold += 0.01f * dir; break;
+    case SetItem::Periodicity: s.periodicityThreshold += 0.01f * dir; break;
+    case SetItem::OnDelay:     s.onDelayMs = (uint16_t)std::max(0, (int)s.onDelayMs + 50 * dir); break;
+    case SetItem::OffDelay:    s.offDelayMs = (uint16_t)std::max(0, (int)s.offDelayMs + 100 * dir); break;
+    case SetItem::MinShot:     s.minShotSeconds += dir; break;
+    case SetItem::MicGain: {
+      // nächste Stufe oberhalb bzw. unterhalb der aktuellen Verstärkung
+      int idx = 0;
+      while (idx + 1 < (int)sizeof(kGainSteps) && kGainSteps[idx] < snap.micGain) ++idx;
+      if (kGainSteps[idx] != snap.micGain && dir < 0) ++idx;  // Zwischenwert -> darunter
+      idx = constrain(idx + dir, 0, (int)sizeof(kGainSteps) - 1);
+      app.cmdSetMicGain(kGainSteps[idx]);
+      return;
+    }
+    case SetItem::Scale:
+    case SetItem::ScaleAutoTare:
+    case SetItem::ScaleTimer: {
+      // -/+ schaltet aus bzw. ein
+      scale::Config c = scale::config();
+      bool& flag = it == SetItem::Scale ? c.enabled : (it == SetItem::ScaleAutoTare ? c.autoTare : c.syncTimer);
+      flag = dir > 0;
+      scale::setConfig(c);
+      return;
+    }
+    case SetItem::Noise:
+      if (snap.noiseCount) noiseSel = (noiseSel + snap.noiseCount + dir) % snap.noiseCount;
+      return;
+    case SetItem::Template:
+      if (snap.profileTemplates) {
+        templateSel = (templateSel + snap.profileTemplates + dir) % snap.profileTemplates;
+      }
+      return;
+    default:
+      return;
+  }
+  app.cmdApplySettings(s);  // begrenzt die Werte und speichert im Profil
+}
+
+void runAction(SetItem it) {
+  switch (it) {
+    case SetItem::Noise:        app.cmdDeleteNoise(noiseSel); noiseSel = 0; break;
+    case SetItem::Template:     app.cmdDeleteTemplate(templateSel); templateSel = 0; break;
+    case SetItem::ClearHistory: app.cmdClearHistory(); break;
+    case SetItem::ResetProfile: app.cmdDeleteSlot(snap.activeSlot); break;
+    case SetItem::ScaleTare:    scale::tare(); break;
+    default: break;
+  }
+}
+
+void drawSettings() {
+  SetItem items[kMaxSetItems];
+  const int n = buildItems(items);
+  setSelected = constrain(setSelected, 0, n - 1);
+  const int pages = (n + kSetRows - 1) / kSetRows;
+  setPage = constrain(setPage, 0, pages - 1);
+  if (noiseSel >= snap.noiseCount) noiseSel = 0;
+  if (templateSel >= snap.profileTemplates) templateSel = 0;
+
+  // Zeilen: Bezeichnung links, Wert rechts; gewählte Zeile hinterlegt
+  for (int r = 0; r < kSetRows; ++r) {
+    const int i = setPage * kSetRows + r;
+    if (i >= n) break;
+    const int y = kSetRowY + r * kSetRowH;
+    if (i == setSelected) canvas.fillRoundRect(4, y, kW - 8, kSetRowH - 2, 4, kColLine);
+    canvas.setFont(kFontText);
+    canvas.setTextColor(i == setSelected ? kColText : kColMuted);
+    canvas.setTextDatum(textdatum_t::middle_left);
+    canvas.drawString(itemLabel(items[i]), 10, y + kSetRowH / 2);
+    canvas.setTextColor(kColAccent);
+    canvas.setTextDatum(textdatum_t::middle_right);
+    canvas.drawString(itemValue(items[i]), kW - 10, y + kSetRowH / 2);
+  }
+
+  // Blätter-Leiste
+  if (pages > 1) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "<   Seite %d/%d   >", setPage + 1, pages);
+    canvas.setFont(kFontSmall);
+    canvas.setTextColor(kColMuted);
+    canvas.setTextDatum(textdatum_t::middle_center);
+    canvas.drawString(buf, kW / 2, kSetPagerY + 9);
+  }
+
+  // Buttons passend zum gewählten Eintrag
+  const SetItem sel = items[setSelected];
+  btnMinus.visible = btnPlus.visible = hasValue(sel);
+  btnAction.visible = hasAction(sel) && !(sel == SetItem::Template && snap.profileTemplates <= 1);
+  const bool confirming = confirmItem == sel && millis() < confirmUntil;
+  btnAction.label = confirming ? "SICHER?"
+                  : sel == SetItem::ResetProfile ? "RESET"
+                  : sel == SetItem::ScaleTare    ? "TARA"
+                                                 : "LÖSCHEN";
+  btnAction.color = isHarmless(sel) ? kColAccent : kColErr;
+  btnAction.textColor = isHarmless(sel) ? kColDark : kColText;
+  drawButton(btnMinus);
+  drawButton(btnPlus);
+  drawButton(btnAction);
+  drawButton(btnSetBack);
+}
+
+void handleSettingsTouch(int x, int y) {
+  SetItem items[kMaxSetItems];
+  const int n = buildItems(items);
+  const int pages = (n + kSetRows - 1) / kSetRows;
+  const SetItem sel = items[constrain(setSelected, 0, n - 1)];
+
+  if (y >= kSetRowY && y < kSetPagerY) {
+    // Zeile antippen = auswählen
+    const int i = setPage * kSetRows + (y - kSetRowY) / kSetRowH;
+    if (i < n) {
+      setSelected = i;
+      confirmUntil = 0;
+    }
+  } else if (y >= kSetPagerY && y < kBtnY && pages > 1) {
+    // linke Hälfte zurück, rechte Hälfte weiter blättern
+    setPage = (setPage + (x < kW / 2 ? pages - 1 : 1)) % pages;
+    setSelected = setPage * kSetRows;
+    confirmUntil = 0;
+  } else if (btnMinus.hit(x, y)) {
+    adjustItem(sel, -1);
+  } else if (btnPlus.hit(x, y)) {
+    adjustItem(sel, +1);
+  } else if (btnAction.hit(x, y)) {
+    // Sicherheitsabfrage: erst nach zweitem Tippen innerhalb von 3 s ausführen
+    // (harmlose Aktionen wie Tara sofort)
+    if (isHarmless(sel) || (confirmItem == sel && millis() < confirmUntil)) {
+      runAction(sel);
+      confirmUntil = 0;
+    } else {
+      confirmItem = sel;
+      confirmUntil = millis() + 3000;
+    }
+  } else if (btnSetBack.hit(x, y)) {
+    screen = Screen::Info;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Touch
+// ---------------------------------------------------------------------------
+
+/// Empfindlichkeit ändern: niedrigere Pegel-Schwelle = empfindlicher.
+void changeSensitivity(float delta) {
+  DetectorSettings s = app.settings();
+  s.levelThreshold -= delta;
+  app.cmdApplySettings(s);  // wird intern begrenzt und gespeichert
+}
+
+void handleTouch() {
+  const auto t = M5.Touch.getDetail();
+  if (!t.wasClicked()) return;
+  const int x = t.x, y = t.y;
+
+  switch (screen) {
+    case Screen::Main:
+      if (btnTeach.hit(x, y)) {
+        screen = Screen::TeachSelect;
+      } else if (snap.scaleConnected && y >= 144 && y < 166) {
+        scale::tare();  // Gewichtszeile antippen = tarieren
+      } else if (btnReset.hit(x, y)) {
+        app.cmdResetTimer();
+      } else if (btnInfo.hit(x, y)) {
+        screen = Screen::Info;
+      }
+      break;
+
+    case Screen::TeachSelect:
+      if (btnLearnPump.hit(x, y)) {
+        app.cmdStartTeach(TeachMode::Pump);
+        screen = Screen::Teach;
+      } else if (btnLearnNoise.hit(x, y)) {
+        app.cmdStartTeach(TeachMode::Noise);
+        screen = Screen::Teach;
+      } else if (btnBack.hit(x, y)) {
+        screen = Screen::Main;
+      }
+      break;
+
+    case Screen::Teach:
+      if (btnFinish.hit(x, y)) {
+        app.cmdFinishTeach();
+      } else if (btnSave.hit(x, y)) {
+        if (app.cmdSaveTeach(false)) screen = Screen::Main;
+      } else if (btnAdd.hit(x, y)) {
+        if (app.cmdSaveTeach(true)) screen = Screen::Main;
+      } else if (btnRetry.hit(x, y)) {
+        app.cmdStartTeach(snap.teachMode);  // gleichen Modus wiederholen
+      } else if (btnCancel.hit(x, y)) {
+        app.cmdCancelTeach();
+        screen = Screen::Main;
+      }
+      break;
+
+    case Screen::Settings:
+      handleSettingsTouch(x, y);
+      break;
+
+    case Screen::Info:
+      if (btnProfile.hit(x, y)) {
+        screen = Screen::Settings;
+      } else if (btnSensDown.hit(x, y)) {
+        changeSensitivity(-0.05f);
+      } else if (btnSensUp.hit(x, y)) {
+        changeSensitivity(+0.05f);
+      } else if (btnInfoBack.hit(x, y)) {
+        screen = Screen::Main;
+      }
+      break;
+  }
+}
+
+}  // namespace
+
+namespace ui {
+
+void begin() {
+  M5.Display.setRotation(1);
+  M5.Display.setBrightness(160);
+  canvas.setColorDepth(16);
+  canvas.setPsram(true);
+  canvas.createSprite(kW, kH);
+}
+
+void loop() {
+  handleTouch();
+
+  const uint32_t now = millis();
+  if (now - lastDrawMs < cfg::kDisplayIntervalMs) return;
+  lastDrawMs = now;
+
+  app.snapshot(snap);
+
+  // Teach-Modus wurde ggf. über die Webseite gestartet/beendet -> Screen folgen.
+  if (snap.teachPhase != TeachPhase::Idle) {
+    screen = Screen::Teach;
+  } else if (screen == Screen::Teach) {
+    screen = Screen::Main;
+  }
+
+  canvas.fillScreen(kColBg);
+  drawHeader();
+  switch (screen) {
+    case Screen::Main:  drawMain();  break;
+    case Screen::TeachSelect: drawTeachSelect(); break;
+    case Screen::Teach: drawTeach(); break;
+    case Screen::Info:  drawInfo();  break;
+    case Screen::Settings: drawSettings(); break;
+  }
+  canvas.pushSprite(0, 0);
+}
+
+void showUpdateProgress(int percent, const char* title) {
+  // Nur bei geändertem Wert neu zeichnen – onProgress kommt sehr häufig.
+  static int lastPercent = -2;
+  if (percent == lastPercent && percent >= 0 && percent < 100) return;
+  lastPercent = percent;
+
+  canvas.fillScreen(kColBg);
+  drawHeader();
+  canvas.setFont(kFontBold);
+  canvas.setTextColor(percent < 0 ? kColErr : kColAccent);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  canvas.drawString(title, kW / 2, 90);
+  if (percent >= 0) {
+    drawBar(20, 120, kW - 40, 16, percent / 100.0f, -1.0f, kColAccent);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d %%", percent);
+    canvas.setTextColor(kColText);
+    canvas.drawString(buf, kW / 2, 160);
+    canvas.setFont(kFontSmall);
+    canvas.setTextColor(kColMuted);
+    canvas.drawString("Bitte nicht ausschalten", kW / 2, 190);
+  }
+  canvas.pushSprite(0, 0);
+}
+
+}  // namespace ui
