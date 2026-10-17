@@ -2,7 +2,7 @@
 
 Ein Shot-Timer, der **ohne Eingriff in die Maschine** erkennt, wann die Pumpe läuft – am Geräusch und optional
 an der Vibration. Er misst die Bezugszeit, arbeitet mit gängigen **Bluetooth-Kaffeewaagen** zusammen und wiegt
-beim Mahlen automatisch das **Kaffeemehl** ab. Bedienung am Touch-Display und parallel über eine Webseite.
+beim Mahlen automatisch den **gemahlenen Kaffee** ab. Bedienung am Touch-Display und parallel über eine Webseite.
 
 ## Funktionen
 
@@ -13,7 +13,7 @@ beim Mahlen automatisch das **Kaffeemehl** ab. Bedienung am Touch-Display und pa
 - **Bluetooth-Waagen:** Felicita (Arc, Incline, Parallel), Acaia (Lunar, Pearl, Pyxis, Cinco …),
   Bookoo Themis, Decent Scale. Gewicht und Durchfluss live, Endgewicht in der Historie.
 - **Mühlen-Tara:** Läuft eine eingelernte Mühle, wird die leere Waage auf *−Siebträgergewicht* tariert. Legst du
-  danach den gefüllten Siebträger auf, steht dort direkt das Kaffeemehl – groß auf dem Display. Die Dosis wird dem
+  danach den gefüllten Siebträger auf, steht dort direkt der gemahlene Kaffee – groß auf dem Display. Die Dosis wird dem
   nächsten Bezug zugeordnet (Historie: `18,0 g → 36,2 g (1:2,0)`).
 - **Bis zu 3 Mühlen** und 3 Störgeräusche je Profil, **5 Profile** (z. B. verschiedene Maschinen).
 - **Uhrzeit** per NTP, gespeichert in der eingebauten RTC (läuft auch ohne WLAN weiter).
@@ -55,11 +55,14 @@ automatisch gemessenen Raumpegel. Das ist nur eine Notlösung – zuverlässig w
 **Hauptbildschirm**
 
 - Statuszeile: *Bereit*, *Pumpe läuft*, *<Mühle> läuft*, *Störgeräusch – ignoriert*; rechts das aktive Profil.
-- Große Zahl: der Timer – beim Mahlen automatisch das Kaffeemehl. **Antippen** schaltet zwischen Timer und
+- Große Zahl: der Timer – beim Mahlen automatisch der gemahlene Kaffee. **Antippen** schaltet zwischen Timer und
   Gewicht um; beginnt oder endet das Mahlen bzw. ein Bezug, gilt wieder die Automatik.
-- Waagenzeile mit **TARA** (Gewicht auf 0) und **ZEIT 0** (Timer der Waage auf 0).
+- Waagenzeile mit Gewicht bzw. Zeit und Durchfluss.
 - Messbalken der Erkennung (Pegel, Takt/Rhythmus bzw. Klangmuster, ggf. Vibration).
-- **TEACH** · **RESET** (Timer, Gewicht und Waagen-Timer auf 0) · **INFO**
+- **TEACH** · **RESET** · **INFO**
+- **RESET** ohne Waage: Bezugszeit auf 0. Mit verbundener Waage öffnet sich eine Auswahl: **ALLES AUF 0**
+  oder einzeln **BEZUGSZEIT** (Zeit am Display), **GEWICHT** (Waage tarieren) und **WAAGEN-ZEIT** (Timer an der
+  Waage).
 
 **INFO** zeigt WLAN, Adresse, Profil und Kennwerte; **EMPF − / +** ändert die Empfindlichkeit.
 **EINST.** enthält alle Einstellungen: Zeile antippen, mit **− / +** ändern, unten auf „< Seite >“ blättern.
@@ -117,8 +120,8 @@ automatisch gefunden und bei Abbruch neu verbunden. Ausgeschaltet wird Bluetooth
 - **Mühlen-Tara:**
   1. Leeren Siebträger auflegen → *Jetzt wiegen* (Webseite) bzw. *EINST. → Siebträger → WIEGEN*.
   2. *Mühlen-Tara* einschalten.
-  3. Mahlen: Die leere Waage wird tariert und zeigt −Siebträgergewicht; gefüllten Siebträger auflegen → das
-     Kaffeemehl steht groß im Display. Nachmahlen tariert nicht erneut.
+  3. Mahlen: Die leere Waage wird tariert und zeigt −Siebträgergewicht; gefüllten Siebträger auflegen → der
+     gemahlene Kaffee steht groß im Display. Nachmahlen tariert nicht erneut.
 - **Historie:** Endgewicht je Bezug (inkl. 4 s Nachtropfen), Dosis und Verhältnis.
 
 Die Waagen selbst zeigen das Rohgewicht – den Siebträger zieht der Coffee Timer rechnerisch ab, da die Waagen

@@ -182,8 +182,11 @@ class App {
 
   /// Setzt die Mikrofon-Verstärkung (wird im Audio-Task übernommen).
   void cmdSetMicGain(uint8_t gain);
-  /// Timer auf 0; mit verbundener Waage zusätzlich Tara und deren Timer auf 0.
-  void cmdResetTimer();
+  /**
+   * Timer auf 0.
+   * @param withScale  mit verbundener Waage zusätzlich Tara und deren Timer auf 0
+   */
+  void cmdResetTimer(bool withScale = true);
   void cmdClearHistory();
   /// Übernimmt Einstellungen sofort; gespeichert wird erst, wenn sie
   /// cfg::kSettingsSaveDelayMs lang unverändert bleiben (schont den Flash).

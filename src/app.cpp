@@ -615,11 +615,11 @@ bool App::cmdDeleteTemplate(uint8_t index) {
   return persistLocked();
 }
 
-void App::cmdResetTimer() {
+void App::cmdResetTimer(bool withScale) {
   Lock lock(mutex_);
   timer_.reset();
   // Alles auf 0: auch Gewicht (Tara, beendet die Dosier-Tara) und Timer der Waage
-  if (scale::connected()) {
+  if (withScale && scale::connected()) {
     scale::tare();
     scale::timerStop();  // falls er noch läuft
     scale::timerReset();

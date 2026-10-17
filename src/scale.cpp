@@ -725,11 +725,27 @@ bool searching() { return searchRequested.load() || searchRunning.load(); }
 std::vector<Found> found() {
   Found list[kMaxFound];
   size_t n;
+  Found current;
   portENTER_CRITICAL(&mux);
   memcpy(list, foundList, sizeof(list));
   n = foundCount;
+  memcpy(current.name, connectedName, sizeof(current.name));
+  memcpy(current.addr, connectedAddr, sizeof(current.addr));
   portEXIT_CRITICAL(&mux);
-  return std::vector<Found>(list, list + n);
+  std::vector<Found> out(list, list + n);
+  // Eine verbundene Waage kündigt sich nicht mehr an und fehlt deshalb in der
+  // Suche -> vorne einfügen (rssi 0 = "verbunden").
+  if (connected() && current.addr[0]) {
+    for (auto it = out.begin(); it != out.end(); ++it) {
+      if (strcasecmp(it->addr, current.addr) == 0) {
+        out.erase(it);
+        break;
+      }
+    }
+    current.rssi = 0;
+    out.insert(out.begin(), current);
+  }
+  return out;
 }
 
 void bind(const char* addr, const char* name) {

@@ -86,7 +86,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     <div id="weightLine" class="hidden" style="text-align:center;font-size:28px;font-weight:700;font-variant-numeric:tabular-nums">
       <span id="weight">–</span> <small id="flow" style="font-size:16px;color:var(--muted)"></small>
       <button style="min-width:0;padding:4px 10px;margin-left:8px;font-size:13px" onclick="post('/api/scale/tare')">Tara</button>
-      <button style="min-width:0;padding:4px 10px;font-size:13px" onclick="post('/api/scale/timer-reset')">Zeit 0</button>
+      <button style="min-width:0;padding:4px 10px;font-size:13px" onclick="post('/api/scale/timer-reset')" title="Timer an der Waage auf 0">Waagen-Zeit 0</button>
     </div>
     <div id="hint" class="hint"></div>
     <div id="profileLine" class="hint" style="margin-top:4px"></div>
@@ -183,7 +183,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     <div class="field"><label><span><input type="checkbox" id="scEnabled"> Waage verwenden (Bluetooth)</span></label></div>
     <div class="field"><label><span><input type="checkbox" id="scAutoTare"> Beim Pumpenstart automatisch tarieren</span></label></div>
     <div class="field"><label><span><input type="checkbox" id="scSyncTimer"> Timer der Waage mit der Pumpe starten/stoppen</span></label></div>
-    <div class="field"><label><span><input type="checkbox" id="scGrindTare"> Beim Mahlen auf −Siebträger tarieren (Kaffeemehl wiegen)</span></label></div>
+    <div class="field"><label><span><input type="checkbox" id="scGrindTare"> Beim Mahlen auf −Siebträger tarieren (gemahlenen Kaffee wiegen)</span></label></div>
     <div class="field">
       <label>Gewicht leerer Siebträger</label>
       <div class="row"><input type="number" id="scPortafilter" min="0" max="2000" step="0.1" style="width:110px"> g
@@ -198,7 +198,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       Bookoo Themis, Decent Scale. Waage einschalten – sie wird automatisch gefunden. Das Endgewicht (inkl. Nachtropfen)
       wird in der Historie gespeichert.<br>
       Mühlen-Tara: jede Mühle einmal über „Einlernen → Mühle“ lernen (bis zu 3 Mühlen). Läuft eine davon, wird die
-      leere Waage tariert und zeigt −Siebträgergewicht; mit dem gefüllten Siebträger darauf steht dort das Kaffeemehl.
+      leere Waage tariert und zeigt −Siebträgergewicht; mit dem gefüllten Siebträger darauf steht dort der gemahlene Kaffee.
       Die Dosis landet beim nächsten Bezug in der Historie.</small>
   </section>
 
@@ -399,7 +399,7 @@ function render(s) {
   bEl.style.color = b.level < 0 ? 'var(--muted)' : b.level > 50 ? 'var(--ok)' : b.level > 20 ? 'var(--warn)' : 'var(--err)';
 
   // Timer
-  // Große Anzeige wie am Display: automatisch beim Mahlen das Kaffeemehl, sonst
+  // Große Anzeige wie am Display: automatisch beim Mahlen der gemahlene Kaffee, sonst
   // der Timer; Klick schaltet um, Beginn/Ende von Mahlen oder Bezug -> wieder Automatik.
   const t = $('timer');
   if (s.scale.doseMode !== bigLastDose || s.running !== bigLastRunning) {
@@ -411,7 +411,7 @@ function render(s) {
   const autoWeight = s.scale.doseMode && !s.running;
   bigShowsWeight = weightKnown && (bigView === 'weight' || (bigView === 'auto' && autoWeight));
   t.innerHTML = bigShowsWeight
-    ? s.scale.weight.toFixed(1) + `<small>g${s.scale.doseMode ? ' Mehl' : ''}</small>`
+    ? s.scale.weight.toFixed(1) + `<small>g${s.scale.doseMode ? ' Kaffee gemahlen' : ''}</small>`
     : fmtSec(s.timerMs) + '<small>s</small>';
   t.classList.toggle('running', s.running);
   t.classList.toggle('dose', bigShowsWeight);
@@ -427,8 +427,8 @@ function render(s) {
   $('weightLine').classList.toggle('hidden', !sc.enabled);
   // Steht das Gewicht groß oben, zeigt diese Zeile stattdessen die Zeit.
   $('weight').textContent = sc.weight === undefined ? 'Waage ' + sc.state
-    : bigShowsWeight ? (sc.doseMode && !s.running ? 'Kaffeemehl · Bezug ' : '') + fmtSec(s.timerMs) + ' s'
-    : (sc.doseMode ? 'Mehl ' : '') + sc.weight.toFixed(1) + ' g';
+    : bigShowsWeight ? (sc.doseMode && !s.running ? 'Kaffee gemahlen · Bezug ' : '') + fmtSec(s.timerMs) + ' s'
+    : (sc.doseMode ? 'Kaffee gemahlen ' : '') + sc.weight.toFixed(1) + ' g';
   $('flow').textContent = sc.weight !== undefined && s.running ? sc.flow.toFixed(1) + ' g/s'
     : sc.dose !== undefined ? `Dosis ${sc.dose.toFixed(1)} g` : '';
   renderScaleBinding(sc);
@@ -729,7 +729,7 @@ function renderScaleBinding(sc) {
   foundKey = key;
   $('scFound').innerHTML = list.map((f, i) => {
     const isBound = bound && f.addr.toLowerCase() === bound.toLowerCase();
-    return `<tr><td><b>${esc(f.name)}</b><br><small style="color:var(--muted)">${esc(f.addr)} · ${f.rssi} dBm</small></td>` +
+    return `<tr><td><b>${esc(f.name)}</b><br><small style="color:var(--muted)">${esc(f.addr)} · ${f.rssi ? f.rssi + ' dBm' : 'verbunden'}</small></td>` +
       `<td>${isBound ? '✓ gekoppelt'
         : `<button style="min-width:0;padding:6px 10px" onclick="bindFound(${i})">Koppeln</button>`}</td></tr>`;
   }).join('');

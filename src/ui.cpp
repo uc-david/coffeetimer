@@ -48,7 +48,7 @@ const lgfx::IFont* kFontText  = &fonts::efontJA_16;
 const lgfx::IFont* kFontBold  = &fonts::efontJA_16_b;
 const lgfx::IFont* kFontTimer = &fonts::Font7;
 
-enum class Screen { Main, TeachSelect, Teach, Info, Settings };
+enum class Screen { Main, TeachSelect, Teach, Info, Settings, ResetMenu };
 
 /// Touch-Schaltfläche.
 struct Button {
@@ -67,9 +67,11 @@ struct Button {
 Button btnTeach   {  4, kBtnY, 100, kBtnH, "TEACH",       kColAccent, kColDark, true};
 Button btnReset   {110, kBtnY, 100, kBtnH, "RESET",       kColLine,   kColText, true};
 Button btnInfo    {216, kBtnY, 100, kBtnH, "INFO",        kColLine,   kColText, true};
-// Waage (in der Gewichtszeile, nur wenn verbunden)
-Button btnScaleTare{  6, 143, 60, 24, "TARA",   kColLine, kColText, false};
-Button btnScaleTime{254, 143, 60, 24, "ZEIT 0", kColLine, kColText, false};
+// RESET-Menü (nur mit verbundener Waage): alles oder einzeln auf 0
+Button btnResetAll  {  8,  58, 304, 56, "ALLES AUF 0", kColAccent, kColDark, true};
+Button btnResetTimer{  8, 122,  98, 56, "BEZUGSZEIT",  kColLine,   kColText, true};
+Button btnResetTare {111, 122,  98, 56, "GEWICHT",     kColLine,   kColText, true};
+Button btnResetScale{214, 122,  98, 56, "WAAGEN-ZEIT", kColLine,   kColText, true};
 
 // Teach-Auswahl: Kacheln im Inhaltsbereich (Pumpe breit, darunter Mühle / Störgeräusch)
 Button btnLearnPump   {  8,  58, 304, 56, "PUMPE",    kColAccent, kColDark, true};
@@ -295,7 +297,7 @@ void drawMain() {
   }
 
   // --- Große Anzeige: Timer oder Gewicht ----------------------------------------
-  // Automatisch: beim Mahlen (Mühlen-Tara bis zum Pumpenstart) das Kaffeemehl,
+  // Automatisch: beim Mahlen (Mühlen-Tara bis zum Pumpenstart) der gemahlene Kaffee,
   // sonst der Timer. Antippen schaltet um; beginnt das Mahlen oder ein Bezug
   // bzw. endet einer, gilt wieder die Automatik.
   if (snap.scaleDoseMode != lastDoseMode || snap.timerRunning != lastTimerRunning) {
@@ -342,7 +344,7 @@ void drawMain() {
 
   // --- Waage (optional) bzw. letzte Bezüge ---------------------------------------
   if (snap.scaleEnabled) {
-    // Gewicht und (während des Bezugs) Durchfluss; links TARA, rechts ZEIT 0
+    // Gewicht und (während des Bezugs) Durchfluss
     char buf[40];
     if (!isnan(snap.scaleWeight)) {
       if (bigShowsWeight) {
@@ -350,11 +352,11 @@ void drawMain() {
         if (snap.timerRunning) {
           snprintf(buf, sizeof(buf), "%s s   %.1f g/s", formatSeconds(snap.timerMs).c_str(), snap.scaleFlow);
         } else {
-          snprintf(buf, sizeof(buf), "%sBezug %s s", snap.scaleDoseMode ? "Kaffeemehl  ·  " : "",
+          snprintf(buf, sizeof(buf), "%sBezug %s s", snap.scaleDoseMode ? "Kaffee gemahlen  ·  " : "",
                    formatSeconds(snap.timerMs).c_str());
         }
       } else if (snap.scaleDoseMode) {
-        snprintf(buf, sizeof(buf), "Mehl %.1f g", snap.scaleWeight);
+        snprintf(buf, sizeof(buf), "Kaffee gemahlen %.1f g", snap.scaleWeight);
       } else if (snap.timerRunning) {
         snprintf(buf, sizeof(buf), "%.1f g   %.1f g/s", snap.scaleWeight, snap.scaleFlow);
       } else {
@@ -369,9 +371,6 @@ void drawMain() {
     }
     canvas.setTextDatum(textdatum_t::middle_center);
     canvas.drawString(buf, kW / 2, 155);
-    btnScaleTare.visible = btnScaleTime.visible = snap.scaleConnected;
-    drawButton(btnScaleTare);
-    drawButton(btnScaleTime);
   } else if (snap.historyCount > 0) {
     String hist = "Zuletzt:";
     for (size_t i = 0; i < snap.historyCount && i < 4; ++i) {
@@ -544,6 +543,19 @@ void drawTile(const Button& b, const char* subtitle) {
   canvas.drawString(b.label, b.x + b.w / 2, b.y + b.h / 2 - 8);
   canvas.setFont(kFontSmall);
   canvas.drawString(subtitle, b.x + b.w / 2, b.y + b.h / 2 + 12);
+}
+
+void drawResetMenu() {
+  canvas.setFont(kFontBold);
+  canvas.setTextColor(kColAccent);
+  canvas.setTextDatum(textdatum_t::top_left);
+  canvas.drawString("Was soll auf 0?", 8, 34);
+
+  drawTile(btnResetAll, "Bezugszeit, Gewicht und Waagen-Zeit");
+  drawTile(btnResetTimer, "hier am Display");
+  drawTile(btnResetTare, "Waage tarieren");
+  drawTile(btnResetScale, "Timer an der Waage");
+  drawButton(btnBack);
 }
 
 void drawTeachSelect() {
@@ -732,8 +744,8 @@ bool hasAction(SetItem it) {
 
 /// Aktionen, die ohne Sicherheitsabfrage sofort ausgeführt werden.
 bool isHarmless(SetItem it) {
-  return it == SetItem::ScalePortafilter || it == SetItem::ScaleSearch || it == SetItem::ScaleChoose ||
-         it == SetItem::ScaleBound;
+  // Kopplung lösen (ScaleBound) bewusst mit Rückfrage
+  return it == SetItem::ScalePortafilter || it == SetItem::ScaleSearch || it == SetItem::ScaleChoose;
 }
 
 String itemValue(SetItem it) {
@@ -1009,16 +1021,32 @@ void handleTouch() {
       } else if (y >= kBigTop && y < kBigBottom && snap.scaleEnabled && !isnan(snap.scaleWeight)) {
         // Große Zahl antippen: zwischen Timer und Gewicht umschalten
         bigView = bigShowsWeight ? BigView::Timer : BigView::Weight;
-      } else if (snap.scaleEnabled && btnScaleTare.hit(x, y)) {
-        scale::tare();
-      } else if (snap.scaleEnabled && btnScaleTime.hit(x, y)) {
-        scale::timerStop();
-        scale::timerReset();
       } else if (btnReset.hit(x, y)) {
-        app.cmdResetTimer();
+        // Mit Waage: Auswahl, was auf 0 gesetzt wird; ohne Waage sofort den Timer
+        if (snap.scaleConnected) {
+          screen = Screen::ResetMenu;
+        } else {
+          app.cmdResetTimer();
+        }
       } else if (btnInfo.hit(x, y)) {
         screen = Screen::Info;
       }
+      break;
+
+    case Screen::ResetMenu:
+      if (btnResetAll.hit(x, y)) {
+        app.cmdResetTimer();  // Timer, Gewicht und Waagen-Timer
+      } else if (btnResetTimer.hit(x, y)) {
+        app.cmdResetTimer(false);
+      } else if (btnResetTare.hit(x, y)) {
+        scale::tare();
+      } else if (btnResetScale.hit(x, y)) {
+        scale::timerStop();
+        scale::timerReset();
+      } else if (!btnBack.hit(x, y)) {
+        break;  // daneben getippt: Menü bleibt offen
+      }
+      screen = Screen::Main;  // nach jeder Auswahl bzw. ZURÜCK
       break;
 
     case Screen::TeachSelect: {
@@ -1107,6 +1135,7 @@ void loop() {
     case Screen::Teach: drawTeach(); break;
     case Screen::Info:  drawInfo();  break;
     case Screen::Settings: drawSettings(); break;
+    case Screen::ResetMenu: drawResetMenu(); break;
   }
   canvas.pushSprite(0, 0);
 }

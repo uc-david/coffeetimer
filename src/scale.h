@@ -52,7 +52,7 @@ struct Config {
 struct Found {
   char name[kNameLen] = "";
   char addr[kAddrLen] = "";
-  int rssi = 0;  ///< Signalstärke in dBm (näher an 0 = näher dran)
+  int rssi = 0;  ///< Signalstärke in dBm (näher an 0 = näher dran); 0 = gerade verbunden
 };
 
 enum class State : uint8_t { Off, Scanning, Connecting, Connected };

@@ -504,7 +504,7 @@ void begin() {
     if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");
     scale::timerStop();
     scale::timerReset();
-    sendOk(true, "Timer der Waage auf 0");
+    sendOk(true, "Waagen-Zeit auf 0");
   });
   server.on("/api/scale/tare", HTTP_POST, [] {
     if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");
