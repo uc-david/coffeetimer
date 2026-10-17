@@ -29,7 +29,12 @@
 
 #include <Arduino.h>
 
+#include <vector>
+
 namespace scale {
+
+constexpr size_t kAddrLen = 18;  ///< "aa:bb:cc:dd:ee:ff" + '\0'
+constexpr size_t kNameLen = 24;
 
 /// Einstellungen der Waagen-Erweiterung (im NVS gespeichert).
 struct Config {
@@ -38,6 +43,16 @@ struct Config {
   bool syncTimer = false;    ///< Timer der Waage mit der Pumpe starten/stoppen
   bool grindTare = false;    ///< beim Mahlen auf -Siebträgergewicht tarieren
   float portafilterG = 0.0f; ///< Gewicht des leeren Siebträgers in g
+  /// Gekoppelte Waage: nur mit dieser Adresse verbinden. Leer = erste passende Waage.
+  char boundAddr[kAddrLen] = "";
+  char boundName[kNameLen] = "";  ///< Name der gekoppelten Waage (nur zur Anzeige)
+};
+
+/// Bei der Suche gefundene Waage.
+struct Found {
+  char name[kNameLen] = "";
+  char addr[kAddrLen] = "";
+  int rssi = 0;  ///< Signalstärke in dBm (näher an 0 = näher dran)
 };
 
 enum class State : uint8_t { Off, Scanning, Connecting, Connected };
@@ -60,8 +75,21 @@ bool stable();
 float flowRate();
 /// Akku der Waage in Prozent, -1 = unbekannt.
 int battery();
-/// Name der verbundenen Waage.
+/// Name bzw. Bluetooth-Adresse der verbundenen Waage.
 String deviceName();
+String deviceAddress();
+
+// Suche und Kopplung
+/// Startet eine Suche nach Waagen (~5 s, läuft im Waagen-Task).
+void startSearch();
+/// true, solange gesucht wird.
+bool searching();
+/// Zuletzt gefundene Waagen (stärkstes Signal zuerst).
+std::vector<Found> found();
+/// Koppelt an eine Waage: Danach wird nur noch mit dieser Adresse verbunden.
+void bind(const char* addr, const char* name);
+/// Kopplung lösen: wieder mit der ersten passenden Waage verbinden.
+void unbind();
 /// Erkanntes Protokoll der verbundenen Waage ("Acaia", "Bookoo" …), leer = keine.
 const char* model();
 

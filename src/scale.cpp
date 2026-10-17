@@ -286,7 +286,17 @@ uint32_t failedCount = 0;  ///< Diagnose: fehlgeschlagene Schreibvorgänge
 char lastCmd[24] = "";     ///< Diagnose: zuletzt gesendete Befehlsfolge
 uint8_t lastRaw[20];
 size_t lastRawLen = 0;
-String connectedName;
+char connectedName[scale::kNameLen] = "";   ///< geschützt durch mux (feste Puffer: kein
+char connectedAddr[scale::kAddrLen] = "";   ///< malloc innerhalb der kritischen Abschnitte)
+
+// --- Suche / Kopplung ---------------------------------------------------------
+constexpr uint32_t kSearchSeconds = 5;      ///< Dauer einer vom Benutzer gestarteten Suche
+constexpr size_t kMaxFound = 8;
+std::atomic<bool> searchRequested{false};
+std::atomic<bool> searchRunning{false};
+std::atomic<bool> reconnectRequested{false};  ///< Kopplung geändert -> neu verbinden
+scale::Found foundList[kMaxFound];          ///< geschützt durch mux
+size_t foundCount = 0;
 
 /// Ringpuffer (Zeit, Rohgewicht) für Durchfluss und Ruhe-Erkennung.
 struct Sample { uint32_t ms; float g; };
@@ -419,6 +429,15 @@ void sendPending() {
   portEXIT_CRITICAL(&mux);
 }
 
+/// Kopiert einen Text sicher in einen festen Puffer.
+template <size_t N>
+void copyStr(char (&dst)[N], const char* src) {
+  strlcpy(dst, src ? src : "", N);
+}
+
+/// Übernimmt die Waagen aus einem Suchlauf in die Liste (stärkstes Signal zuerst).
+void collectFound(NimBLEScanResults& results);
+
 bool isScaleName(String name) {
   name.toUpperCase();
   for (const char* prefix : kNamePrefixes) {
@@ -443,6 +462,31 @@ void disconnect() {
   if (client && client->isConnected()) client->disconnect();
 }
 
+void collectFound(NimBLEScanResults& results) {
+  scale::Found list[kMaxFound];
+  size_t n = 0;
+  for (int i = 0; i < results.getCount(); ++i) {
+    NimBLEAdvertisedDevice dev = results.getDevice(i);
+    const String name = dev.getName().c_str();
+    if (!isScaleName(name)) continue;
+    scale::Found f;
+    copyStr(f.name, name.c_str());
+    copyStr(f.addr, dev.getAddress().toString().c_str());
+    f.rssi = dev.getRSSI();
+    // nach Signalstärke einsortieren (stärkstes zuerst), höchstens kMaxFound
+    size_t pos = 0;
+    while (pos < n && list[pos].rssi >= f.rssi) ++pos;
+    if (pos >= kMaxFound) continue;
+    for (size_t k = (n < kMaxFound ? n : kMaxFound - 1); k > pos; --k) list[k] = list[k - 1];
+    list[pos] = f;
+    if (n < kMaxFound) ++n;
+  }
+  portENTER_CRITICAL(&mux);
+  memcpy(foundList, list, sizeof(list));
+  foundCount = n;
+  portEXIT_CRITICAL(&mux);
+}
+
 /// Sucht eine unterstützte Waage und verbindet sich. true = verbunden.
 bool findAndConnect() {
   state = scale::State::Scanning;
@@ -451,16 +495,20 @@ bool findAndConnect() {
   scan->setInterval(100);
   scan->setWindow(99);
   NimBLEScanResults results = scan->start(kScanSeconds, false);
+  collectFound(results);
 
+  // Gekoppelt: nur genau diese Adresse. Sonst die erste Waage mit passendem Namen.
+  const String bound = cfg.boundAddr;
   NimBLEAddress address;
   String name;
   bool found = false;
   for (int i = 0; i < results.getCount() && !found; ++i) {
     NimBLEAdvertisedDevice dev = results.getDevice(i);
     const String n = dev.getName().c_str();
-    if (isScaleName(n)) {
+    const String a = dev.getAddress().toString().c_str();
+    if (bound.isEmpty() ? isScaleName(n) : a.equalsIgnoreCase(bound)) {
       address = dev.getAddress();
-      name = n;
+      name = n.isEmpty() ? String(cfg.boundName) : n;
       found = true;
     }
   }
@@ -493,7 +541,8 @@ bool findAndConnect() {
     return false;
   }
   portENTER_CRITICAL(&mux);
-  connectedName = name;
+  copyStr(connectedName, name.c_str());
+  copyStr(connectedAddr, address.toString().c_str());
   sampleCount = 0;
   batteryPct = -1;
   lastPacketMs = 0;
@@ -512,6 +561,7 @@ void scaleTask(void*) {
   for (;;) {
     if (!cfg.enabled) {
       disconnect();
+      searchRequested = false;  // ohne Bluetooth keine Suche
       state = scale::State::Off;
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
@@ -520,6 +570,20 @@ void scaleTask(void*) {
       NimBLEDevice::init("CoffeeTimer");
       bleStarted = true;
     }
+    // Vom Benutzer gestartete Suche (auch während einer Verbindung möglich)
+    if (searchRequested.exchange(false)) {
+      searchRunning = true;
+      NimBLEScan* scan = NimBLEDevice::getScan();
+      scan->setActiveScan(true);
+      scan->setInterval(100);
+      scan->setWindow(99);
+      NimBLEScanResults results = scan->start(kSearchSeconds, false);
+      collectFound(results);
+      scan->clearResults();
+      searchRunning = false;
+    }
+    // Kopplung geändert: bestehende Verbindung trennen, neu (gezielt) verbinden
+    if (reconnectRequested.exchange(false)) disconnect();
     if (client && client->isConnected() && proto.load()) {
       // Verbunden, aber keine Daten mehr (z. B. Anmeldung verloren) -> neu verbinden
       portENTER_CRITICAL(&mux);
@@ -551,6 +615,8 @@ void begin() {
   cfg.syncTimer = prefs.getBool("syncTimer", false);
   cfg.grindTare = prefs.getBool("grindTare", false);
   cfg.portafilterG = prefs.getFloat("pfG", 0.0f);
+  prefs.getString("bAddr", cfg.boundAddr, sizeof(cfg.boundAddr));
+  prefs.getString("bName", cfg.boundName, sizeof(cfg.boundName));
   // Eigener Task auf Core 0 (niedrige Priorität): Suche/Verbindungsaufbau
   // blockieren einige Sekunden und dürfen Display und Erkennung nicht stören.
   xTaskCreatePinnedToCore(scaleTask, "scale", 6144, nullptr, 1, nullptr, 0);
@@ -566,6 +632,8 @@ void setConfig(const Config& c) {
   prefs.putBool("syncTimer", cfg.syncTimer);
   prefs.putBool("grindTare", cfg.grindTare);
   prefs.putFloat("pfG", cfg.portafilterG);
+  prefs.putString("bAddr", cfg.boundAddr);
+  prefs.putString("bName", cfg.boundName);
 }
 
 const char* stateText() {
@@ -635,10 +703,50 @@ int battery() {
 }
 
 String deviceName() {
+  char n[kNameLen];
   portENTER_CRITICAL(&mux);
-  String n = connectedName;
+  memcpy(n, connectedName, sizeof(n));
   portEXIT_CRITICAL(&mux);
   return n;
+}
+
+String deviceAddress() {
+  char a[kAddrLen];
+  portENTER_CRITICAL(&mux);
+  memcpy(a, connectedAddr, sizeof(a));
+  portEXIT_CRITICAL(&mux);
+  return a;
+}
+
+void startSearch() { searchRequested = true; }
+
+bool searching() { return searchRequested.load() || searchRunning.load(); }
+
+std::vector<Found> found() {
+  Found list[kMaxFound];
+  size_t n;
+  portENTER_CRITICAL(&mux);
+  memcpy(list, foundList, sizeof(list));
+  n = foundCount;
+  portEXIT_CRITICAL(&mux);
+  return std::vector<Found>(list, list + n);
+}
+
+void bind(const char* addr, const char* name) {
+  Config c = cfg;
+  copyStr(c.boundAddr, addr);
+  copyStr(c.boundName, name);
+  setConfig(c);
+  // Mit einer anderen Waage verbunden? -> trennen, der Task verbindet gezielt neu
+  if (connected() && !deviceAddress().equalsIgnoreCase(addr)) reconnectRequested = true;
+  Serial.printf("[scale] gekoppelt mit %s (%s)\n", name, addr);
+}
+
+void unbind() {
+  Config c = cfg;
+  c.boundAddr[0] = c.boundName[0] = '\0';
+  setConfig(c);
+  Serial.println("[scale] Kopplung gelöst – erste passende Waage");
 }
 
 const char* model() {
@@ -714,6 +822,9 @@ void diagnostics(String& out) {
            weight(), battery(), cfg.portafilterG, doseMode() ? " (Dosier-Tara aktiv)" : "");
   out += buf;
   portENTER_CRITICAL(&mux);
+  snprintf(buf, sizeof(buf), "  Kopplung: %s%s%s%s\n", cfg.boundAddr[0] ? cfg.boundName : "keine (erste passende Waage)",
+           cfg.boundAddr[0] ? " (" : "", cfg.boundAddr, cfg.boundAddr[0] ? ")" : "");
+  out += buf;
   snprintf(buf, sizeof(buf), "  Befehle: gesendet %lu, fehlgeschlagen %lu, zuletzt %s\n",
            (unsigned long)sentCount, (unsigned long)failedCount, lastCmd[0] ? lastCmd : "-");
   portEXIT_CRITICAL(&mux);

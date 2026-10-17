@@ -192,6 +192,17 @@ void handleStatus() {
   sc["flow"] = s.scaleFlow;
   sc["battery"] = s.scaleBattery;
   sc["name"] = scale::deviceName();
+  sc["address"] = scale::deviceAddress();
+  sc["boundAddr"] = scfg.boundAddr;
+  sc["boundName"] = scfg.boundName;
+  sc["searching"] = scale::searching();
+  JsonArray found = sc["found"].to<JsonArray>();
+  for (const scale::Found& f : scale::found()) {
+    JsonObject o = found.add<JsonObject>();
+    o["name"] = f.name;
+    o["addr"] = f.addr;
+    o["rssi"] = f.rssi;
+  }
 
   JsonObject vib = doc["vibration"].to<JsonObject>();
   vib["available"] = s.vibAvailable;
@@ -468,6 +479,24 @@ void begin() {
     deserializeJson(in, server.arg("plain"));
     const bool ok = app.cmdRenameGrinder(in["index"] | 255, in["name"] | "");
     sendOk(ok, ok ? "Umbenannt" : "Umbenennen fehlgeschlagen");
+  });
+  // Waagen suchen / koppeln: Body {"addr": "...", "name": "..."}
+  server.on("/api/scale/search", HTTP_POST, [] {
+    if (!scale::config().enabled) return sendOk(false, "Waage zuerst einschalten");
+    scale::startSearch();
+    sendOk(true, "Suche läuft (ca. 5 s) …");
+  });
+  server.on("/api/scale/bind", HTTP_POST, [] {
+    JsonDocument in;
+    deserializeJson(in, server.arg("plain"));
+    const char* addr = in["addr"] | "";
+    if (strlen(addr) < 11) return sendOk(false, "Ungültige Adresse");
+    scale::bind(addr, in["name"] | "");
+    sendOk(true, "Waage gekoppelt – es wird nur noch mit ihr verbunden");
+  });
+  server.on("/api/scale/unbind", HTTP_POST, [] {
+    scale::unbind();
+    sendOk(true, "Kopplung gelöst – erste passende Waage wird verwendet");
   });
   server.on("/api/scale/timer-reset", HTTP_POST, [] {
     if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");

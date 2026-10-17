@@ -625,7 +625,7 @@ void drawInfo() {
 /// Einträge des Einstellungs-Screens.
 enum class SetItem {
   Profile, Source, VibThreshold, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
-  Scale, ScaleAutoTare, ScaleTimer, ScaleGrindTare, ScalePortafilter, Grinder,
+  Scale, ScaleSearch, ScaleChoose, ScaleBound, ScaleAutoTare, ScaleTimer, ScaleGrindTare, ScalePortafilter, Grinder,
   Noise, Template, ClearHistory, ResetProfile
 };
 
@@ -633,7 +633,7 @@ constexpr int kSetRowY = 30;                                ///< erste Zeile
 constexpr int kSetRowH = 22;                                ///< Zeilenhöhe
 constexpr int kSetRows = 7;                                 ///< Zeilen je Seite
 constexpr int kSetPagerY = kSetRowY + kSetRows * kSetRowH;  ///< Blätter-Leiste
-constexpr int kMaxSetItems = 22;
+constexpr int kMaxSetItems = 26;
 
 Button btnMinus  {  4, kBtnY, 75, kBtnH, "-",       kColLine,   kColText, true};
 Button btnPlus   { 83, kBtnY, 75, kBtnH, "+",       kColLine,   kColText, true};
@@ -644,6 +644,7 @@ int setSelected = 0;          ///< gewählter Eintrag
 int setPage = 0;              ///< aktuelle Seite
 uint8_t noiseSel = 0;         ///< gewähltes Störgeräusch (zum Löschen)
 uint8_t grinderSel = 0;       ///< gewählte Mühle (zum Löschen)
+uint8_t scaleSel = 0;         ///< gewählte Waage aus der Suche (zum Koppeln)
 uint8_t templateSel = 0;      ///< gewähltes Klangmuster (zum Löschen)
 SetItem confirmItem = SetItem::Profile;
 uint32_t confirmUntil = 0;    ///< Löschen erst nach zweitem Tippen bis zu diesem Zeitpunkt
@@ -675,6 +676,9 @@ int buildItems(SetItem* out) {
     out[n++] = SetItem::ScaleTimer;
     out[n++] = SetItem::ScaleGrindTare;
     out[n++] = SetItem::ScalePortafilter;
+    out[n++] = SetItem::ScaleSearch;
+    if (!scale::found().empty()) out[n++] = SetItem::ScaleChoose;
+    out[n++] = SetItem::ScaleBound;
   }
   if (snap.grinderCount > 0) out[n++] = SetItem::Grinder;
   if (snap.noiseCount > 0) out[n++] = SetItem::Noise;
@@ -701,6 +705,9 @@ const char* itemLabel(SetItem it) {
     case SetItem::ScaleTimer:   return "Waagen-Timer";
     case SetItem::ScaleGrindTare: return "Mühlen-Tara";
     case SetItem::ScalePortafilter: return "Siebträger";
+    case SetItem::ScaleSearch:  return "Waage suchen";
+    case SetItem::ScaleChoose:  return "Waage wählen";
+    case SetItem::ScaleBound:   return "Gekoppelt";
     case SetItem::Grinder:      return "Mühle";
     case SetItem::Noise:        return "Störgeräusch";
     case SetItem::Template:     return "Klangmuster";
@@ -712,17 +719,22 @@ const char* itemLabel(SetItem it) {
 
 /// Eintrag hat einen mit -/+ änderbaren Wert?
 bool hasValue(SetItem it) {
-  return it != SetItem::ClearHistory && it != SetItem::ResetProfile;
+  return it != SetItem::ClearHistory && it != SetItem::ResetProfile && it != SetItem::ScaleSearch &&
+         it != SetItem::ScaleBound;
 }
 
 /// Eintrag hat eine Aktion (Löschen/Zurücksetzen)?
 bool hasAction(SetItem it) {
   return it == SetItem::Noise || it == SetItem::Grinder || it == SetItem::Template || it == SetItem::ClearHistory ||
-         it == SetItem::ResetProfile || it == SetItem::ScalePortafilter;
+         it == SetItem::ResetProfile || it == SetItem::ScalePortafilter || it == SetItem::ScaleSearch ||
+         it == SetItem::ScaleChoose || (it == SetItem::ScaleBound && scale::config().boundAddr[0]);
 }
 
 /// Aktionen, die ohne Sicherheitsabfrage sofort ausgeführt werden.
-bool isHarmless(SetItem it) { return it == SetItem::ScalePortafilter; }
+bool isHarmless(SetItem it) {
+  return it == SetItem::ScalePortafilter || it == SetItem::ScaleSearch || it == SetItem::ScaleChoose ||
+         it == SetItem::ScaleBound;
+}
 
 String itemValue(SetItem it) {
   const DetectorSettings& st = snap.settings;
@@ -749,6 +761,30 @@ String itemValue(SetItem it) {
     case SetItem::ScaleTimer:    snprintf(buf, sizeof(buf), scale::config().syncTimer ? "an" : "aus"); break;
     case SetItem::ScaleGrindTare: snprintf(buf, sizeof(buf), scale::config().grindTare ? "an" : "aus"); break;
     case SetItem::ScalePortafilter: snprintf(buf, sizeof(buf), "%.1f g", scale::config().portafilterG); break;
+    case SetItem::ScaleSearch: {
+      const size_t n = scale::found().size();
+      if (scale::searching()) {
+        snprintf(buf, sizeof(buf), "sucht …");
+      } else {
+        snprintf(buf, sizeof(buf), "%u gefunden", (unsigned)n);
+      }
+      break;
+    }
+    case SetItem::ScaleChoose: {
+      const std::vector<scale::Found> list = scale::found();
+      if (scaleSel >= list.size()) scaleSel = 0;
+      if (list.empty()) {
+        snprintf(buf, sizeof(buf), "-");
+      } else {
+        snprintf(buf, sizeof(buf), "%.14s (%u/%u)", list[scaleSel].name, scaleSel + 1, (unsigned)list.size());
+      }
+      break;
+    }
+    case SetItem::ScaleBound: {
+      const scale::Config c = scale::config();
+      snprintf(buf, sizeof(buf), "%.18s", c.boundAddr[0] ? (c.boundName[0] ? c.boundName : c.boundAddr) : "keine");
+      break;
+    }
     case SetItem::Grinder:
       snprintf(buf, sizeof(buf), "%.12s (%u/%u)", snap.grinderNames[grinderSel], grinderSel + 1,
                snap.grinderCount);
@@ -810,6 +846,11 @@ void adjustItem(SetItem it, int dir) {
       scale::setConfig(c);
       return;
     }
+    case SetItem::ScaleChoose: {
+      const size_t n = scale::found().size();
+      if (n) scaleSel = (scaleSel + n + dir) % n;
+      return;
+    }
     case SetItem::ScalePortafilter: {
       scale::Config c = scale::config();
       c.portafilterG = fmaxf(0.0f, roundf(c.portafilterG) + dir);
@@ -841,6 +882,13 @@ void runAction(SetItem it) {
     case SetItem::ClearHistory: app.cmdClearHistory(); break;
     case SetItem::ResetProfile: app.cmdDeleteSlot(snap.activeSlot); break;
     case SetItem::ScalePortafilter: scale::learnPortafilter(); break;
+    case SetItem::ScaleSearch:  scale::startSearch(); scaleSel = 0; break;
+    case SetItem::ScaleChoose: {
+      const std::vector<scale::Found> list = scale::found();
+      if (scaleSel < list.size()) scale::bind(list[scaleSel].addr, list[scaleSel].name);
+      break;
+    }
+    case SetItem::ScaleBound:   scale::unbind(); break;
     default: break;
   }
 }
@@ -888,6 +936,9 @@ void drawSettings() {
   btnAction.label = confirming ? "SICHER?"
                   : sel == SetItem::ResetProfile ? "RESET"
                   : sel == SetItem::ScalePortafilter ? "WIEGEN"
+                  : sel == SetItem::ScaleSearch  ? "SUCHEN"
+                  : sel == SetItem::ScaleChoose  ? "KOPPELN"
+                  : sel == SetItem::ScaleBound   ? "LÖSEN"
                                                  : "LÖSCHEN";
   btnAction.color = isHarmless(sel) ? kColAccent : kColErr;
   btnAction.textColor = isHarmless(sel) ? kColDark : kColText;

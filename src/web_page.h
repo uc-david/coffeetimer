@@ -169,6 +169,17 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
   <section class="card">
     <h2>Waage (Bluetooth)</h2>
     <div class="kv" id="scaleInfo"></div>
+    <div class="field">
+      <label>Gekoppelte Waage <b id="scBound"></b></label>
+      <div class="row">
+        <button onclick="searchScales()" id="scSearchBtn">Waagen suchen</button>
+        <button onclick="bindCurrentScale()" id="scBindCurrent" class="hidden">Diese Waage merken</button>
+        <button onclick="unbindScale()" id="scUnbind" class="hidden">Kopplung lösen</button>
+      </div>
+      <table id="scFound" style="margin-top:6px"></table>
+      <small>Gekoppelt verbindet sich der Coffee Timer nur noch mit dieser einen Waage (z. B. wenn mehrere in Reichweite
+        sind). Ohne Kopplung wird die erste passende Waage genommen.</small>
+    </div>
     <div class="field"><label><span><input type="checkbox" id="scEnabled"> Waage verwenden (Bluetooth)</span></label></div>
     <div class="field"><label><span><input type="checkbox" id="scAutoTare"> Beim Pumpenstart automatisch tarieren</span></label></div>
     <div class="field"><label><span><input type="checkbox" id="scSyncTimer"> Timer der Waage mit der Pumpe starten/stoppen</span></label></div>
@@ -420,6 +431,7 @@ function render(s) {
     : (sc.doseMode ? 'Mehl ' : '') + sc.weight.toFixed(1) + ' g';
   $('flow').textContent = sc.weight !== undefined && s.running ? sc.flow.toFixed(1) + ' g/s'
     : sc.dose !== undefined ? `Dosis ${sc.dose.toFixed(1)} g` : '';
+  renderScaleBinding(sc);
   $('scaleInfo').innerHTML = `<span>Status: <b>${esc(sc.state)}</b></span>` +
     (sc.connected ? `<span>Gerät: <b>${esc(sc.name)}</b> (${esc(sc.model)})</span>` +
                     `<span>Akku: <b>${sc.battery >= 0 ? sc.battery + ' %' : '–'}</b></span>` : '') +
@@ -696,6 +708,36 @@ function saveScale() {
   post('/api/scale', { enabled: $('scEnabled').checked, autoTare: $('scAutoTare').checked,
                        syncTimer: $('scSyncTimer').checked, grindTare: $('scGrindTare').checked,
                        portafilterG: parseFloat($('scPortafilter').value) || 0 });
+}
+function searchScales() { post('/api/scale/search'); }
+function bindScale(addr, name) { post('/api/scale/bind', { addr, name }); }
+function bindCurrentScale() { bindScale(lastScale.address, lastScale.name); }
+function unbindScale() { post('/api/scale/unbind'); }
+let lastScale = {}, foundKey = '';
+/** Kopplung und Suchergebnisse anzeigen (Liste nur bei Änderung neu aufbauen). */
+function renderScaleBinding(sc) {
+  lastScale = sc;
+  const bound = sc.boundAddr || '';
+  $('scBound').textContent = bound ? `${sc.boundName || 'Waage'} (${bound})` : 'keine – erste passende Waage';
+  $('scUnbind').classList.toggle('hidden', !bound);
+  $('scBindCurrent').classList.toggle('hidden', !sc.connected || !!bound);
+  $('scSearchBtn').disabled = !!sc.searching;
+  $('scSearchBtn').textContent = sc.searching ? 'Suche läuft …' : 'Waagen suchen';
+  const list = sc.found || [];
+  const key = JSON.stringify(list) + bound;
+  if (key === foundKey) return;
+  foundKey = key;
+  $('scFound').innerHTML = list.map((f, i) => {
+    const isBound = bound && f.addr.toLowerCase() === bound.toLowerCase();
+    return `<tr><td><b>${esc(f.name)}</b><br><small style="color:var(--muted)">${esc(f.addr)} · ${f.rssi} dBm</small></td>` +
+      `<td>${isBound ? '✓ gekoppelt'
+        : `<button style="min-width:0;padding:6px 10px" onclick="bindFound(${i})">Koppeln</button>`}</td></tr>`;
+  }).join('');
+}
+/** Waage aus der Suchliste koppeln (Index statt Name im HTML: keine Probleme mit Sonderzeichen). */
+function bindFound(i) {
+  const f = (lastScale.found || [])[i];
+  if (f) bindScale(f.addr, f.name);
 }
 function learnPortafilter() {
   post('/api/scale/portafilter').then(j => { if (j && j.ok) scaleLoaded = false; });
