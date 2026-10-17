@@ -213,6 +213,15 @@ uint8_t loadActiveSlot() {
 
 void saveActiveSlot(uint8_t slot) { prefs.putUChar("slot", slot); }
 
+static String grinderKey(uint8_t slot) { return "grinder" + String(slot + 1); }
+
+int8_t loadGrinder(uint8_t slot) {
+  const int8_t i = prefs.getChar(grinderKey(slot).c_str(), -1);
+  return i >= 0 && i < (int8_t)cfg::kMaxNoises ? i : -1;
+}
+
+void saveGrinder(uint8_t slot, int8_t index) { prefs.putChar(grinderKey(slot).c_str(), index); }
+
 uint8_t loadMicGain() {
   return constrain(prefs.getUChar("micGain", cfg::kMicGainDefault), cfg::kMicGainMin, cfg::kMicGainMax);
 }

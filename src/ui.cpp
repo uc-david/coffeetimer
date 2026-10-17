@@ -10,6 +10,7 @@
 
 #include "app.h"
 #include "battery.h"
+#include "datetime.h"
 #include "net_manager.h"
 #include "scale.h"
 
@@ -191,13 +192,15 @@ int drawBattery(int right, int cy) {
   return bx;
 }
 
-/// Kopfzeile mit Titel, Netzwerkstatus und Akkuanzeige.
+/// Kopfzeile mit Datum/Uhrzeit (sonst Titel), Netzwerkstatus und Akkuanzeige.
 void drawHeader() {
   canvas.fillRect(0, 0, kW, 26, kColCard);
+  char clock[24];
+  datetime::format(clock, sizeof(clock));
   canvas.setFont(kFontBold);
   canvas.setTextColor(kColAccent);
   canvas.setTextDatum(textdatum_t::middle_left);
-  canvas.drawString("Coffee Timer", 8, 13);
+  canvas.drawString(clock[0] ? clock : "Coffee Timer", 8, 13);
 
   String netTxt;
   uint16_t col = kColMuted;
@@ -239,6 +242,9 @@ void drawMain() {
   } else if (snap.detector.pumpOn) {
     statusTxt = "Pumpe läuft";
     statusCol = kColRun;
+  } else if (snap.grinderOn) {
+    statusTxt = "Mühle läuft";
+    statusCol = kColAccent;
   } else if (snap.detector.rejected) {
     statusTxt = "Störgeräusch – ignoriert";
     statusCol = kColMuted;
@@ -283,7 +289,9 @@ void drawMain() {
     // Gewicht und (während des Bezugs) Durchfluss; Antippen = Tara
     char buf[40];
     if (!isnan(snap.scaleWeight)) {
-      if (snap.timerRunning) {
+      if (snap.scaleDoseMode) {
+        snprintf(buf, sizeof(buf), "Mehl %.1f g", snap.scaleWeight);
+      } else if (snap.timerRunning) {
         snprintf(buf, sizeof(buf), "%.1f g   %.1f g/s", snap.scaleWeight, snap.scaleFlow);
       } else {
         snprintf(buf, sizeof(buf), "%.1f g", snap.scaleWeight);
@@ -516,7 +524,7 @@ void drawInfo() {
 /// Einträge des Einstellungs-Screens.
 enum class SetItem {
   Profile, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
-  Scale, ScaleAutoTare, ScaleTimer, ScaleTare,
+  Scale, ScaleAutoTare, ScaleTimer, ScaleTare, ScaleGrindTare, ScalePortafilter, Grinder,
   Noise, Template, ClearHistory, ResetProfile
 };
 
@@ -524,7 +532,7 @@ constexpr int kSetRowY = 30;                                ///< erste Zeile
 constexpr int kSetRowH = 22;                                ///< Zeilenhöhe
 constexpr int kSetRows = 7;                                 ///< Zeilen je Seite
 constexpr int kSetPagerY = kSetRowY + kSetRows * kSetRowH;  ///< Blätter-Leiste
-constexpr int kMaxSetItems = 16;
+constexpr int kMaxSetItems = 20;
 
 Button btnMinus  {  4, kBtnY, 75, kBtnH, "-",       kColLine,   kColText, true};
 Button btnPlus   { 83, kBtnY, 75, kBtnH, "+",       kColLine,   kColText, true};
@@ -560,8 +568,13 @@ int buildItems(SetItem* out) {
     out[n++] = SetItem::ScaleAutoTare;
     out[n++] = SetItem::ScaleTimer;
     out[n++] = SetItem::ScaleTare;
+    out[n++] = SetItem::ScaleGrindTare;
+    out[n++] = SetItem::ScalePortafilter;
   }
-  if (snap.noiseCount > 0) out[n++] = SetItem::Noise;
+  if (snap.noiseCount > 0) {
+    out[n++] = SetItem::Grinder;
+    out[n++] = SetItem::Noise;
+  }
   if (!snap.profileDefault && snap.profileTemplates > 1) out[n++] = SetItem::Template;
   out[n++] = SetItem::ClearHistory;
   out[n++] = SetItem::ResetProfile;
@@ -582,6 +595,9 @@ const char* itemLabel(SetItem it) {
     case SetItem::ScaleAutoTare:return "Auto-Tara";
     case SetItem::ScaleTimer:   return "Waagen-Timer";
     case SetItem::ScaleTare:    return "Waage tarieren";
+    case SetItem::ScaleGrindTare: return "Mühlen-Tara";
+    case SetItem::ScalePortafilter: return "Siebträger";
+    case SetItem::Grinder:      return "Mühle ist";
     case SetItem::Noise:        return "Störgeräusch";
     case SetItem::Template:     return "Klangmuster";
     case SetItem::ClearHistory: return "Historie";
@@ -598,11 +614,11 @@ bool hasValue(SetItem it) {
 /// Eintrag hat eine Aktion (Löschen/Zurücksetzen)?
 bool hasAction(SetItem it) {
   return it == SetItem::Noise || it == SetItem::Template || it == SetItem::ClearHistory ||
-         it == SetItem::ResetProfile || it == SetItem::ScaleTare;
+         it == SetItem::ResetProfile || it == SetItem::ScaleTare || it == SetItem::ScalePortafilter;
 }
 
 /// Aktionen, die ohne Sicherheitsabfrage sofort ausgeführt werden.
-bool isHarmless(SetItem it) { return it == SetItem::ScaleTare; }
+bool isHarmless(SetItem it) { return it == SetItem::ScaleTare || it == SetItem::ScalePortafilter; }
 
 String itemValue(SetItem it) {
   const DetectorSettings& st = snap.settings;
@@ -623,6 +639,15 @@ String itemValue(SetItem it) {
       break;
     case SetItem::ScaleAutoTare: snprintf(buf, sizeof(buf), scale::config().autoTare ? "an" : "aus"); break;
     case SetItem::ScaleTimer:    snprintf(buf, sizeof(buf), scale::config().syncTimer ? "an" : "aus"); break;
+    case SetItem::ScaleGrindTare: snprintf(buf, sizeof(buf), scale::config().grindTare ? "an" : "aus"); break;
+    case SetItem::ScalePortafilter: snprintf(buf, sizeof(buf), "%.1f g", scale::config().portafilterG); break;
+    case SetItem::Grinder:
+      if (snap.grinderNoise < 0) {
+        snprintf(buf, sizeof(buf), "keine");
+      } else {
+        snprintf(buf, sizeof(buf), "Störg. %d%s", snap.grinderNoise + 1, snap.grinderOn ? " (läuft)" : "");
+      }
+      break;
     case SetItem::ScaleTare:
       if (isnan(snap.scaleWeight)) {
         snprintf(buf, sizeof(buf), "-");
@@ -664,14 +689,28 @@ void adjustItem(SetItem it, int dir) {
     }
     case SetItem::Scale:
     case SetItem::ScaleAutoTare:
-    case SetItem::ScaleTimer: {
+    case SetItem::ScaleTimer:
+    case SetItem::ScaleGrindTare: {
       // -/+ schaltet aus bzw. ein
       scale::Config c = scale::config();
-      bool& flag = it == SetItem::Scale ? c.enabled : (it == SetItem::ScaleAutoTare ? c.autoTare : c.syncTimer);
+      bool& flag = it == SetItem::Scale         ? c.enabled
+                   : it == SetItem::ScaleAutoTare ? c.autoTare
+                   : it == SetItem::ScaleTimer    ? c.syncTimer
+                                                  : c.grindTare;
       flag = dir > 0;
       scale::setConfig(c);
       return;
     }
+    case SetItem::ScalePortafilter: {
+      scale::Config c = scale::config();
+      c.portafilterG = fmaxf(0.0f, roundf(c.portafilterG) + dir);
+      scale::setConfig(c);
+      return;
+    }
+    case SetItem::Grinder:
+      // keine -> Störg. 1 -> … -> letztes -> keine
+      app.cmdSetGrinder((snap.grinderNoise + 1 + dir + snap.noiseCount + 1) % (snap.noiseCount + 1) - 1);
+      return;
     case SetItem::Noise:
       if (snap.noiseCount) noiseSel = (noiseSel + snap.noiseCount + dir) % snap.noiseCount;
       return;
@@ -693,6 +732,7 @@ void runAction(SetItem it) {
     case SetItem::ClearHistory: app.cmdClearHistory(); break;
     case SetItem::ResetProfile: app.cmdDeleteSlot(snap.activeSlot); break;
     case SetItem::ScaleTare:    scale::tare(); break;
+    case SetItem::ScalePortafilter: scale::learnPortafilter(); break;
     default: break;
   }
 }
@@ -739,6 +779,7 @@ void drawSettings() {
   btnAction.label = confirming ? "SICHER?"
                   : sel == SetItem::ResetProfile ? "RESET"
                   : sel == SetItem::ScaleTare    ? "TARA"
+                  : sel == SetItem::ScalePortafilter ? "WIEGEN"
                                                  : "LÖSCHEN";
   btnAction.color = isHarmless(sel) ? kColAccent : kColErr;
   btnAction.textColor = isHarmless(sel) ? kColDark : kColText;

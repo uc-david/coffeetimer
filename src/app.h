@@ -94,6 +94,12 @@ struct StatusSnapshot {
   float scaleWeight = NAN;        ///< g, NAN = keine Daten
   float scaleFlow = 0.0f;         ///< g/s
   int scaleBattery = -1;
+  bool scaleDoseMode = false;     ///< Dosier-Tara aktiv (Gewicht = Kaffeemehl)
+  float doseG = NAN;              ///< zuletzt gewogene Dosis (für den nächsten Bezug)
+
+  // Mühle
+  int8_t grinderNoise = -1;       ///< Störgeräusch, das die Mühle ist (-1 = keines)
+  bool grinderOn = false;         ///< Mühle läuft gerade
 
   // Mikrofon
   uint8_t micGain = cfg::kMicGainDefault;
@@ -134,6 +140,9 @@ class App {
   void cmdClearNoise();
   /// Löscht ein einzelnes Störgeräusch (Index 0..count-1).
   bool cmdDeleteNoise(uint8_t index);
+  /// Markiert ein Störgeräusch als Mühle (-1 = keines). Läuft die Mühle,
+  /// wird die Waage auf das negative Siebträgergewicht tariert.
+  bool cmdSetGrinder(int8_t index);
   /// Löscht ein einzelnes Klangmuster der Pumpe (das letzte bleibt immer erhalten).
   bool cmdDeleteTemplate(uint8_t index);
 
@@ -201,6 +210,13 @@ class App {
 
   // Waage
   uint32_t weightUntilMs_ = 0;  ///< bis dahin Endgewicht nachführen (0 = aus)
+  void handleGrinder(const AudioFrame& f);  ///< Dosier-Tara und Dosis (unter Mutex)
+  int8_t grinder_ = -1;         ///< Störgeräusch "Mühle" des aktiven Slots
+  bool grinderWasOn_ = false;
+  float doseG_ = NAN;           ///< zuletzt gewogene Dosis
+  uint32_t doseAtMs_ = 0;       ///< Zeitpunkt der Dosis
+  uint32_t doseTareMs_ = 0;     ///< Zeitpunkt der letzten Dosier-Tara
+  uint32_t grinderStarts_ = 0;  ///< Diagnose: erkannte Mühlenläufe
 
   // --- Diagnose ---
   static constexpr size_t kMaxEvents = 10;

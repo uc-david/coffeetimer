@@ -24,6 +24,7 @@ bool ShotTimer::stop(uint32_t endMs, uint32_t minHistoryMs) {
     ShotRecord& r = history_[historyHead_];
     r.durationMs = lastDurationMs_;
     r.weightG = NAN;
+    r.doseG = NAN;
     const time_t now = time(nullptr);
     r.endEpoch = now > kValidEpoch ? now : 0;
     historyHead_ = (historyHead_ + 1) % cfg::kHistorySize;
@@ -35,6 +36,11 @@ bool ShotTimer::stop(uint32_t endMs, uint32_t minHistoryMs) {
 void ShotTimer::setLatestWeight(float g) {
   if (historyCount_ == 0) return;
   history_[(historyHead_ + cfg::kHistorySize - 1) % cfg::kHistorySize].weightG = g;
+}
+
+void ShotTimer::setLatestDose(float g) {
+  if (historyCount_ == 0) return;
+  history_[(historyHead_ + cfg::kHistorySize - 1) % cfg::kHistorySize].doseG = g;
 }
 
 void ShotTimer::reset() {

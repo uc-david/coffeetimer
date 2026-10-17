@@ -19,6 +19,11 @@ constexpr float kHystSteady = 1.30f;
 
 /// Maximale Rückdatierung des Timer-Starts auf den Beginn der lauten Phase.
 constexpr uint32_t kMaxBackdateMs = 1500;  // Pegelschwankung darf bei laufender Pumpe etwas größer sein
+// Mühle: so lange hörbar, bis sie als laufend gilt / Aussetzer, die toleriert
+// werden / Stille, nach der sie als aus gilt.
+constexpr uint32_t kGrinderOnMs = 1000;
+constexpr uint32_t kGrinderGapMs = 300;
+constexpr uint32_t kGrinderOffMs = 1500;
 
 /// Skalarprodukt zweier Bandvektoren.
 float dotBands(const float* a, const float* b) {
@@ -151,7 +156,8 @@ bool PumpDetector::isLoud(float rmsDb, const PumpProfile& p, const DetectorSetti
 }
 
 FrameScores PumpDetector::score(const float* bandDb, float rmsDb, const float* curve,
-                                float steadiness, const PumpProfile& p, const NoiseProfile& n) {
+                                float steadiness, const PumpProfile& p, const NoiseProfile& n,
+                                int grinder) {
   FrameScores s;
   s.steadiness = steadiness;
   float x[cfg::kNumBands];
@@ -171,8 +177,13 @@ FrameScores PumpDetector::score(const float* bandDb, float rmsDb, const float* c
     const float ns = audible ? bestTemplate(x, e.templates, e.templateCount) : 0.0f;
     const float nr = rhythmSimilarity(curve, e.rhythm);
     const float c = combined(p.periodic, ns, nr);
+    if ((int)i == grinder) {
+      s.grinderSimilarity = ns;
+      s.grinderRhythm = nr;
+    }
     if (c > bestNoise) {
       bestNoise = c;
+      s.noiseIndex = static_cast<int8_t>(i);
       s.noiseSimilarity = ns;
       s.noiseRhythm = nr;
     }
@@ -293,8 +304,35 @@ void PumpDetector::updateAutoBackground(float rmsDb) {
   profile_.pumpRmsDb = bg + cfg::kDefaultSpanDb;
 }
 
+void PumpDetector::updateGrinder(uint32_t now) {
+  const FrameScores& s = status_.scores;
+  const bool on = status_.grinderOn;
+  bool raw = false;
+  if (grinder_ >= 0 && grinder_ < (int)noise_.count && !status_.rawActive && !status_.pumpOn) {
+    // Vergleichswert der Pumpe wie in matches(): Standardprofil ohne Muster -> Schwelle
+    const float pumpScore = profile_.templateCount == 0 && !profile_.periodic
+                                ? settings_.similarityThreshold
+                                : combined(profile_.periodic, s.similarity, s.rhythm);
+    const float simTh = settings_.similarityThreshold * (on ? kHystSimilarity : 1.0f);
+    // Die Mühle muss das ähnlichste Störgeräusch sein (nicht z. B. der Milchaufschäumer).
+    raw = s.noiseIndex == grinder_ && isLoud(status_.rmsDb, profile_, settings_, on) &&
+          s.grinderSimilarity >= simTh &&
+          combined(profile_.periodic, s.grinderSimilarity, s.grinderRhythm) >= pumpScore;
+  }
+
+  if (raw) {
+    if (grinderSinceMs_ == 0) grinderSinceMs_ = now;
+    grinderLastMs_ = now;
+    if (!on && now - grinderSinceMs_ >= kGrinderOnMs) status_.grinderOn = true;
+  } else if (grinderSinceMs_ && now - grinderLastMs_ > (on ? kGrinderOffMs : kGrinderGapMs)) {
+    grinderSinceMs_ = 0;
+    status_.grinderOn = false;
+  }
+}
+
 void PumpDetector::reset() {
   status_ = DetectorStatus{};
+  grinderSinceMs_ = 0;
   status_.periodic = profile_.periodic;
   steady_.reset();
   loudSinceMs_ = 0;
@@ -308,7 +346,7 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
   status_.periodic = profile_.periodic;
   if (!profile_.valid) {
     status_.scores = FrameScores{};
-    status_.rawActive = status_.rejected = false;
+    status_.rawActive = status_.rejected = status_.grinderOn = false;
     return Event::None;
   }
 
@@ -317,9 +355,16 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
   if (loud && steady_.runLength() == 0) loudSinceMs_ = f.timestampMs;
   const float steadiness = steady_.update(f.rmsDb, loud);
 
-  status_.scores = score(f.bandDb, f.rmsDb, curve, steadiness, profile_, noise_);
+  status_.scores = score(f.bandDb, f.rmsDb, curve, steadiness, profile_, noise_, grinder_);
   status_.rawActive = matches(status_.scores, profile_, noise_, settings_, status_.pumpOn,
                               &status_.rejected);
+  updateGrinder(f.timestampMs);
+  // Solange die Mühle läuft (inkl. Nachlauf), keine Pumpe starten: das
+  // Auslaufen des Mahlwerks klingt kurz pumpenähnlich.
+  if (status_.grinderOn && !status_.pumpOn && status_.rawActive) {
+    status_.rawActive = false;
+    status_.rejected = true;
+  }
 
   // Standardprofil: Raumpegel nachführen (nach der Bewertung dieses Frames)
   const bool isDefault = profile_.isDefault();

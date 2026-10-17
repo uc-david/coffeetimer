@@ -128,6 +128,7 @@ void App::handleFrame(AudioFrame& f) {
   const PumpDetector::Event ev = detector_.process(f, extractor_.acfCurve());
   const DetectorStatus& st = detector_.status();
   if (st.rejected) ++rejectedFrames_;
+  handleGrinder(f);
   if (ev == PumpDetector::Event::Started) current_ = DetectionEvent{};
   if (st.pumpOn || ev == PumpDetector::Event::Stopped) accumulateEvent(st.scores);
 
@@ -135,7 +136,8 @@ void App::handleFrame(AudioFrame& f) {
     case PumpDetector::Event::Started: {
       timer_.start(detector_.onsetMs());
       weightUntilMs_ = 0;
-      // Waage: tarieren und ggf. ihren Timer mitstarten
+      // Waage: Dosier-Tara beenden, tarieren und ggf. ihren Timer mitstarten
+      scale::clearDoseOffset();
       const scale::Config sc = scale::config();
       if (scale::connected()) {
         if (sc.autoTare) scale::tare();
@@ -175,6 +177,11 @@ void App::handleFrame(AudioFrame& f) {
           timer_.setLatestWeight(scale::weight());
           weightUntilMs_ = f.timestampMs + cfg::kWeightSettleMs;
         }
+        // Vorher gewogenes Kaffeemehl diesem Bezug zuordnen (einmalig)
+        if (timer_.lastStopRecorded() && !isnan(doseG_)) {
+          if (f.timestampMs - doseAtMs_ < cfg::kDoseValidMs) timer_.setLatestDose(doseG_);
+          doseG_ = NAN;
+        }
       }
       break;
     }
@@ -189,6 +196,35 @@ void App::handleFrame(AudioFrame& f) {
         }
       }
       break;
+  }
+}
+
+void App::handleGrinder(const AudioFrame& f) {
+  const bool on = detector_.status().grinderOn;
+  if (on && !grinderWasOn_) {
+    Serial.println("[detect] Mühle läuft");
+    ++grinderStarts_;
+    // Nachmahlen (Dosier-Tara läuft noch) nicht neu tarieren – die Waage ist
+    // dann ggf. schon mit der ersten Portion belegt worden.
+    const bool recent = scale::doseMode() && f.timestampMs - doseTareMs_ < cfg::kDoseValidMs;
+    const scale::Config sc = scale::config();
+    if (sc.grindTare && scale::connected() && !recent) {
+      scale::tareForDose();  // Anzeige: -Siebträger, mit gefülltem Siebträger = Dosis
+      doseG_ = NAN;
+      doseTareMs_ = f.timestampMs;
+    }
+    // Neuer Bezug wird vorbereitet: Timer der Waage auf 0 (steht sonst noch auf dem letzten Bezug)
+    if (sc.syncTimer && scale::connected() && !timer_.running()) scale::timerReset();
+  }
+  grinderWasOn_ = on;
+
+  // Dosis: letzter ruhiger, positiver Wert während der Dosier-Tara
+  if (scale::doseMode() && scale::stable()) {
+    const float w = scale::weight();
+    if (!isnan(w) && w >= cfg::kMinDoseG) {
+      doseG_ = w;
+      doseAtMs_ = f.timestampMs;
+    }
   }
 }
 
@@ -256,6 +292,8 @@ void App::diagnosticsText(String& out) {
   if (!lastNoiseTeach_.isEmpty()) out += "Teach Stoer: " + lastNoiseTeach_ + "\n";
 
   scale::diagnostics(out);
+  add("Muehle: Stoergeraeusch %d, erkannt %lu x, Dosier-Tara %s, Dosis %.1f g", grinder_ + 1,
+      (unsigned long)grinderStarts_, scale::doseMode() ? "aktiv" : "aus", doseG_);
 
   out += "\nJetzt:\n";
   scores("live", detector_.status().scores);
@@ -295,6 +333,10 @@ void App::snapshot(StatusSnapshot& out) {
   out.scaleWeight = scale::weight();
   out.scaleFlow = scale::flowRate();
   out.scaleBattery = scale::battery();
+  out.scaleDoseMode = scale::doseMode();
+  out.doseG = doseG_;
+  out.grinderNoise = grinder_;
+  out.grinderOn = detector_.status().grinderOn;
   out.clipRatio = clipPeak_;
 
   out.profileValid = profile_.valid;
@@ -444,9 +486,22 @@ bool App::cmdSaveTeach(bool add, String* note) {
   return true;
 }
 
+bool App::cmdSetGrinder(int8_t index) {
+  Lock lock(mutex_);
+  if (index >= (int8_t)noise_.count) return false;
+  grinder_ = index < 0 ? -1 : index;
+  settings::saveGrinder(activeSlot_, grinder_);
+  detector_.setGrinder(grinder_);
+  Serial.printf("[profil] Mühle = Störgeräusch %d\n", grinder_ + 1);
+  return true;
+}
+
 void App::cmdClearNoise() {
   Lock lock(mutex_);
   noise_.count = 0;
+  grinder_ = -1;
+  settings::saveGrinder(activeSlot_, grinder_);
+  detector_.setGrinder(grinder_);
   persistLocked();
   detector_.setNoise(noise_);
   Serial.println("[teach] Störgeräusche gelöscht");
@@ -459,6 +514,11 @@ bool App::cmdDeleteNoise(uint8_t index) {
           sizeof(NoiseProfile::Entry) * (noise_.count - index - 1));
   --noise_.count;
   detector_.setNoise(noise_);
+  // Markierung "Mühle" mitverschieben
+  if (grinder_ == (int8_t)index) grinder_ = -1;
+  else if (grinder_ > (int8_t)index) --grinder_;
+  settings::saveGrinder(activeSlot_, grinder_);
+  detector_.setGrinder(grinder_);
   Serial.printf("[profil] Störgeräusch %u gelöscht\n", index + 1);
   return persistLocked();
 }
@@ -478,6 +538,10 @@ bool App::cmdDeleteTemplate(uint8_t index) {
 void App::cmdResetTimer() {
   Lock lock(mutex_);
   timer_.reset();
+  if (scale::connected() && scale::config().syncTimer) {
+    scale::timerStop();  // falls er noch läuft
+    scale::timerReset();
+  }
 }
 
 void App::cmdClearHistory() {
@@ -520,8 +584,11 @@ void App::loadSlotLocked(uint8_t slot) {
   noise_ = slotBuf.noise;
   settings_ = slotBuf.settings;
   memcpy(slotName_, slotBuf.name, sizeof(slotName_));
+  grinder_ = settings::loadGrinder(activeSlot_);
+  if (grinder_ >= (int8_t)noise_.count) grinder_ = -1;
   detector_.setProfile(profile_);
   detector_.setNoise(noise_);
+  detector_.setGrinder(grinder_);
   detector_.setSettings(settings_);
   Serial.printf("[profil] Slot %u aktiv: %s%s\n", activeSlot_ + 1, slotName_,
                 profile_.isDefault() ? " (Standardprofil)" : "");
@@ -590,6 +657,7 @@ bool App::cmdDeleteSlot(uint8_t slot) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
   const bool ok = settings::deleteSlot(slot);
+  settings::saveGrinder(slot, -1);
   settings::defaultSlot(slot, slotBuf);
   summarize(slotBuf, false, summaries_[slot]);
   if (slot == activeSlot_) {
@@ -619,6 +687,7 @@ bool App::cmdImportSlot(uint8_t slot, const String& data) {
   Lock lock(mutex_);
   if (!settings::decodeSlot(data, slotBuf)) return false;
   const bool ok = settings::saveSlot(slot, slotBuf);
+  if (ok) settings::saveGrinder(slot, -1);  // Markierung "Mühle" gehört nicht zum Export
   summarize(slotBuf, ok, summaries_[slot]);
   if (ok && slot == activeSlot_) {
     teach_.cancel();

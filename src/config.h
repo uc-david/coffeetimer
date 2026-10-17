@@ -184,6 +184,11 @@ constexpr float kQualMaxNoiseHit    = 0.05f;  ///< Störgeräusch darf höchsten
 /// (Nachtropfen), bevor es in der Historie feststeht.
 constexpr uint32_t kWeightSettleMs = 4000;
 
+/// Dosier-Tara: Ab diesem Gewicht gilt ein ruhiger Wert als Kaffeemehl-Dosis ...
+constexpr float kMinDoseG = 3.0f;
+/// ... und wird höchstens so lange danach dem nächsten Bezug zugeordnet.
+constexpr uint32_t kDoseValidMs = 15 * 60 * 1000;
+
 /// Anzahl der gespeicherten Bezüge in der Historie.
 constexpr size_t kHistorySize = 10;
 
@@ -200,7 +205,7 @@ constexpr const char* kHostname = "coffeetimer";
 /// Zeit, die eine Verbindung mit dem gespeicherten WLAN versucht wird.
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 
-/// Zeitzone für die Uhrzeit in der Historie (Mitteleuropa inkl. Sommerzeit).
+/// Zeitzone für Uhrzeit-Anzeige und Historie (Mitteleuropa inkl. Sommerzeit).
 constexpr const char* kTimezone = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // ---------------------------------------------------------------------------

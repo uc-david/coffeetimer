@@ -76,6 +76,9 @@ void handleStatus() {
 
   JsonObject live = doc["live"].to<JsonObject>();
   live["rmsDb"] = s.detector.rmsDb;
+  live["grinderOn"] = s.grinderOn;
+  live["grinderSim"] = s.detector.scores.grinderSimilarity;
+  live["noiseSim"] = s.detector.scores.noiseSimilarity;
   live["similarity"] = s.detector.scores.similarity;
   live["periodicity"] = s.detector.scores.periodicity;
   live["rhythm"] = s.detector.scores.rhythm;
@@ -100,6 +103,7 @@ void handleStatus() {
   prof["rhythmThreshold"] = s.profileRhythmTh;
   prof["steadyThreshold"] = s.profileSteadyTh;
   prof["noiseCount"] = s.noiseCount;
+  prof["grinder"] = s.grinderNoise;
 
   fillSettings(doc["settings"].to<JsonObject>(), s.settings);
 
@@ -109,6 +113,7 @@ void handleStatus() {
     h["ms"] = s.history[i].durationMs;
     h["epoch"] = static_cast<uint32_t>(s.history[i].endEpoch);
     if (!isnan(s.history[i].weightG)) h["g"] = s.history[i].weightG;
+    if (!isnan(s.history[i].doseG)) h["dose"] = s.history[i].doseG;
   }
 
   JsonObject teach = doc["teach"].to<JsonObject>();
@@ -166,6 +171,11 @@ void handleStatus() {
   sc["enabled"] = scfg.enabled;
   sc["autoTare"] = scfg.autoTare;
   sc["syncTimer"] = scfg.syncTimer;
+  sc["grindTare"] = scfg.grindTare;
+  sc["portafilterG"] = scfg.portafilterG;
+  sc["doseMode"] = s.scaleDoseMode;
+  if (!isnan(s.doseG)) sc["dose"] = s.doseG;
+  sc["model"] = scale::model();
   sc["state"] = s.scaleState;
   sc["connected"] = s.scaleConnected;
   if (!isnan(s.scaleWeight)) sc["weight"] = s.scaleWeight;
@@ -409,8 +419,24 @@ void begin() {
     c.enabled = in["enabled"] | c.enabled;
     c.autoTare = in["autoTare"] | c.autoTare;
     c.syncTimer = in["syncTimer"] | c.syncTimer;
+    c.grindTare = in["grindTare"] | c.grindTare;
+    c.portafilterG = in["portafilterG"] | c.portafilterG;
     scale::setConfig(c);
-    sendOk(true, c.enabled ? "Waage aktiviert – suche Felicita …" : "Waage deaktiviert");
+    sendOk(true, c.enabled ? "Waage gespeichert – suche Waage …" : "Waage deaktiviert");
+  });
+  server.on("/api/scale/portafilter", HTTP_POST, [] {
+    if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");
+    if (!scale::learnPortafilter()) return sendOk(false, "Leeren Siebträger auflegen und ruhig liegen lassen");
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Siebträger: %.1f g", scale::config().portafilterG);
+    sendOk(true, msg);
+  });
+  // Welches Störgeräusch ist die Mühle? Body {"index": n}, -1 = keines
+  server.on("/api/grinder", HTTP_POST, [] {
+    JsonDocument in;
+    deserializeJson(in, server.arg("plain"));
+    const bool ok = app.cmdSetGrinder(in["index"] | -1);
+    sendOk(ok, ok ? "Mühle gespeichert" : "Störgeräusch nicht vorhanden");
   });
   server.on("/api/scale/tare", HTTP_POST, [] {
     if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");

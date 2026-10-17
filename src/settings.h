@@ -135,6 +135,11 @@ bool decodeSlot(const String& in, ProfileSlot& out);
 uint8_t loadActiveSlot();
 void saveActiveSlot(uint8_t slot);
 
+/// Welches Störgeräusch eines Slots die Mühle ist (-1 = keines). Liegt im NVS,
+/// damit das Slot-Dateiformat (und Exporte) unverändert bleiben.
+int8_t loadGrinder(uint8_t slot);
+void saveGrinder(uint8_t slot, int8_t index);
+
 uint8_t loadMicGain();
 void saveMicGain(uint8_t gain);
 

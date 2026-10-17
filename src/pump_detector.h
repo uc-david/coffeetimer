@@ -38,6 +38,9 @@ struct FrameScores {
   float levelRatio = 0.0f;       ///< Pegel relativ Hintergrund(0) .. Pumpe(1)
   float noiseSimilarity = 0.0f;  ///< bestes Klangmuster eines Störgeräuschs
   float noiseRhythm = -1.0f;     ///< beste Rhythmus-Form eines Störgeräuschs
+  float grinderSimilarity = 0.0f;  ///< Klangmuster des als Mühle markierten Störgeräuschs
+  float grinderRhythm = -1.0f;     ///< Rhythmus-Form der Mühle
+  int8_t noiseIndex = -1;          ///< ähnlichstes Störgeräusch (-1 = keines)
   float steadiness = 99.0f;      ///< Pegelschwankung in dB (klein = gleichmäßig)
 };
 
@@ -70,6 +73,7 @@ struct DetectorStatus {
   bool pumpOn = false;       ///< entprellter Zustand
   bool rawActive = false;    ///< unentprellte Einzelentscheidung des Frames
   bool rejected = false;     ///< klang nach Pumpe, aber eher nach Störgeräusch
+  bool grinderOn = false;    ///< Mühle läuft (entprellt)
   bool periodic = false;     ///< Takt wird für die Erkennung genutzt
   FrameScores scores;
   float rmsDb = -90.0f;      ///< aktueller Pegel dBFS
@@ -83,6 +87,8 @@ class PumpDetector {
   void setProfile(const PumpProfile& p);
   void setNoise(const NoiseProfile& n) { noise_ = n; }
   void setSettings(const DetectorSettings& s) { settings_ = s; }
+  /// Welches Störgeräusch die Mühle ist (Index, -1 = keines).
+  void setGrinder(int8_t index) { grinder_ = index; }
 
   /// Setzt den entprellten Zustand zurück (z. B. nach dem Teach-Modus).
   void reset();
@@ -106,8 +112,9 @@ class PumpDetector {
 
   /// Berechnet alle Vergleichswerte eines Frames.
   /// @param steadiness  Ergebnis von SteadinessTracker::update()
+  /// @param grinder     Index des Störgeräuschs "Mühle" (-1 = keines)
   static FrameScores score(const float* bandDb, float rmsDb, const float* curve, float steadiness,
-                           const PumpProfile& p, const NoiseProfile& n);
+                           const PumpProfile& p, const NoiseProfile& n, int grinder = -1);
 
   /// Gilt der Pegel als "laut" (Pumpe möglich)? Grundlage der Gleichmäßigkeit.
   static bool isLoud(float rmsDb, const PumpProfile& p, const DetectorSettings& st, bool hysteresis);
@@ -161,6 +168,12 @@ class PumpDetector {
   DetectorStatus status_;
   /// Standardprofil: Raumpegel automatisch nachführen.
   void updateAutoBackground(float rmsDb);
+  /// Mühle erkennen: lautes Geräusch, das dem Mühlen-Störgeräusch ähnlicher ist als der Pumpe.
+  void updateGrinder(uint32_t now);
+
+  int8_t grinder_ = -1;
+  uint32_t grinderSinceMs_ = 0;    ///< Beginn der aktuellen Mühlen-Phase (0 = keine)
+  uint32_t grinderLastMs_ = 0;     ///< letzter Frame, der nach Mühle klang
 
   SteadinessTracker steady_;
   bool autoBgInit_ = false;     ///< automatischer Hintergrund initialisiert?

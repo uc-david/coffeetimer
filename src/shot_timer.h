@@ -16,6 +16,7 @@ struct ShotRecord {
   uint32_t durationMs = 0;  ///< Pumpenlaufzeit
   time_t endEpoch = 0;      ///< Uhrzeit des Endes (0 = unbekannt, kein NTP)
   float weightG = NAN;      ///< Gewicht in der Tasse (Waage), NAN = keine Waage
+  float doseG = NAN;        ///< gewogenes Kaffeemehl (Dosier-Tara), NAN = unbekannt
 };
 
 class ShotTimer {
@@ -36,6 +37,8 @@ class ShotTimer {
 
   /// Aktualisiert das Gewicht des neuesten Historien-Eintrags (Nachtropfen).
   void setLatestWeight(float g);
+  /// Setzt die Kaffeemehl-Dosis des neuesten Historien-Eintrags.
+  void setLatestDose(float g);
 
   /// Setzt die Anzeige auf 0 (ohne Historien-Eintrag).
   void reset();

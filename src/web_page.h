@@ -111,7 +111,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       <button class="primary" id="teachBtn" onclick="startTeach('pump')">Pumpe einlernen</button>
       <button id="noiseBtn" onclick="startTeach('noise')">Störgeräusch einlernen</button>
     </div>
-    <small style="color:var(--muted)">Störgeräusch: z. B. die Mühle laufen lassen – wird danach ignoriert.</small>
+    <small style="color:var(--muted)">Störgeräusch: z. B. die Mühle laufen lassen – wird danach ignoriert und kann als Mühle markiert werden.</small>
     <div id="offline" class="offline hidden">Keine Verbindung zum Gerät …</div>
   </section>
 
@@ -158,17 +158,28 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
 
   <!-- Waage ---------------------------------------------------------------- -->
   <section class="card">
-    <h2>Waage (Felicita Arc)</h2>
+    <h2>Waage (Bluetooth)</h2>
     <div class="kv" id="scaleInfo"></div>
     <div class="field"><label><span><input type="checkbox" id="scEnabled"> Waage verwenden (Bluetooth)</span></label></div>
     <div class="field"><label><span><input type="checkbox" id="scAutoTare"> Beim Pumpenstart automatisch tarieren</span></label></div>
     <div class="field"><label><span><input type="checkbox" id="scSyncTimer"> Timer der Waage mit der Pumpe starten/stoppen</span></label></div>
+    <div class="field"><label><span><input type="checkbox" id="scGrindTare"> Beim Mahlen auf −Siebträger tarieren (Kaffeemehl wiegen)</span></label></div>
+    <div class="field">
+      <label>Gewicht leerer Siebträger</label>
+      <div class="row"><input type="number" id="scPortafilter" min="0" max="2000" step="0.1" style="width:110px"> g
+        <button onclick="learnPortafilter()">Jetzt wiegen</button></div>
+      <small>Leeren Siebträger auf die Waage legen und „Jetzt wiegen“ tippen – oder Gewicht eintragen.</small>
+    </div>
     <div class="row">
       <button class="primary" onclick="saveScale()">Übernehmen</button>
       <button onclick="post('/api/scale/tare')">Jetzt tarieren</button>
     </div>
-    <small style="color:var(--muted)">Waage einschalten – sie wird automatisch gefunden. Das Endgewicht (inkl. Nachtropfen)
-      wird in der Historie gespeichert.</small>
+    <small style="color:var(--muted)">Unterstützt: Felicita (Arc, Incline, Parallel), Acaia (Lunar, Pearl, Pyxis, Cinco …),
+      Bookoo Themis, Decent Scale. Waage einschalten – sie wird automatisch gefunden. Das Endgewicht (inkl. Nachtropfen)
+      wird in der Historie gespeichert.<br>
+      Mühlen-Tara: Mühle als Störgeräusch einlernen und unter „Erkennung“ als Mühle markieren. Läuft die Mühle, wird die
+      leere Waage tariert und zeigt −Siebträgergewicht; mit dem gefüllten Siebträger darauf steht dort das Kaffeemehl.
+      Die Dosis landet beim nächsten Bezug in der Historie.</small>
   </section>
 
   <!-- Mikrofon ------------------------------------------------------------ -->
@@ -316,6 +327,7 @@ function render(s) {
   if (s.teach.phase !== 'idle') txt = 'Teach';
   else if (!s.profile.valid) txt = 'Kein Profil';
   else if (s.pumpOn) { txt = 'Pumpe läuft'; on = true; }
+  else if (s.live.grinderOn) txt = 'Mühle läuft';
   else if (s.live.rejected) txt = 'Störgeräusch – ignoriert';
   st.textContent = txt; st.classList.toggle('on', on);
 
@@ -338,12 +350,17 @@ function render(s) {
   // Waage
   const sc = s.scale;
   $('weightLine').classList.toggle('hidden', !sc.enabled);
-  $('weight').textContent = sc.weight !== undefined ? sc.weight.toFixed(1) + ' g' : 'Waage ' + sc.state;
-  $('flow').textContent = sc.weight !== undefined && s.running ? sc.flow.toFixed(1) + ' g/s' : '';
+  $('weight').textContent = sc.weight === undefined ? 'Waage ' + sc.state
+    : (sc.doseMode ? 'Mehl ' : '') + sc.weight.toFixed(1) + ' g';
+  $('flow').textContent = sc.weight !== undefined && s.running ? sc.flow.toFixed(1) + ' g/s'
+    : sc.dose !== undefined ? `Dosis ${sc.dose.toFixed(1)} g` : '';
   $('scaleInfo').innerHTML = `<span>Status: <b>${esc(sc.state)}</b></span>` +
-    (sc.connected ? `<span>Gerät: <b>${esc(sc.name)}</b></span><span>Akku: <b>${sc.battery >= 0 ? sc.battery + ' %' : '–'}</b></span>` : '');
+    (sc.connected ? `<span>Gerät: <b>${esc(sc.name)}</b> (${esc(sc.model)})</span>` +
+                    `<span>Akku: <b>${sc.battery >= 0 ? sc.battery + ' %' : '–'}</b></span>` : '') +
+    `<span>Siebträger: <b>${sc.portafilterG.toFixed(1)} g</b></span>`;
   if (!scaleLoaded) {
     $('scEnabled').checked = sc.enabled; $('scAutoTare').checked = sc.autoTare; $('scSyncTimer').checked = sc.syncTimer;
+    $('scGrindTare').checked = sc.grindTare; $('scPortafilter').value = sc.portafilterG.toFixed(1);
     scaleLoaded = true;
   }
 
@@ -466,7 +483,10 @@ function renderHistory(h) {
   tb.innerHTML = h.map((e, i) => {
     const when = e.epoch ? new Date(e.epoch * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
                          : '#' + (h.length - i);
-    const g = e.g !== undefined ? `${e.g.toFixed(1)} g` : '';
+    let g = e.g !== undefined ? `${e.g.toFixed(1)} g` : '';
+    if (e.dose !== undefined) {
+      g = `${e.dose.toFixed(1)} g → ${g || '?'}` + (e.g !== undefined ? ` (1:${(e.g / e.dose).toFixed(1)})` : '');
+    }
     return `<tr><td>${when}</td><td style="color:var(--muted)">${g}</td><td><b>${fmtSec(e.ms)} s</b></td></tr>`;
   }).join('');
 }
@@ -493,7 +513,7 @@ function startTeach(mode) { post('/api/teach/start', { mode }); }
 /** Liste der Klangmuster und Störgeräusche mit Löschknöpfen (nur bei Änderung neu aufbauen). */
 let partsKey = '';
 function renderParts(p) {
-  const key = `${p.slot}/${p.templates}/${p.noiseCount}/${p.isDefault}`;
+  const key = `${p.slot}/${p.templates}/${p.noiseCount}/${p.isDefault}/${p.grinder}`;
   if (key === partsKey) return;
   partsKey = key;
   const btn = (fn, i, enabled) =>
@@ -503,13 +523,18 @@ function renderParts(p) {
     for (let i = 0; i < p.templates; ++i)
       rows += `<tr><td>Klangmuster ${i + 1}</td><td>${btn('deleteTemplate', i, p.templates > 1)}</td></tr>`;
   }
-  for (let i = 0; i < p.noiseCount; ++i)
-    rows += `<tr><td>Störgeräusch ${i + 1}</td><td>${btn('deleteNoise', i, true)}</td></tr>`;
+  for (let i = 0; i < p.noiseCount; ++i) {
+    const isGrinder = p.grinder === i;
+    const mark = `<button style="min-width:0;padding:4px 10px" ${isGrinder ? 'class="primary"' : ''} ` +
+      `title="Als Mühle markieren (Mühlen-Tara)" onclick="setGrinder(${isGrinder ? -1 : i})">${isGrinder ? '✓ Mühle' : 'Mühle?'}</button>`;
+    rows += `<tr><td>Störgeräusch ${i + 1}${isGrinder ? ' (Mühle)' : ''}</td><td style="white-space:nowrap">${mark} ${btn('deleteNoise', i, true)}</td></tr>`;
+  }
   $('partsList').innerHTML = rows;
 }
 function deleteTemplate(i) {
   if (confirm(`Klangmuster ${i + 1} löschen?`)) post('/api/templates/delete', { index: i }).then(loadProfiles);
 }
+function setGrinder(i) { post('/api/grinder', { index: i }); }
 function deleteNoise(i) {
   if (confirm(`Störgeräusch ${i + 1} löschen?`)) post('/api/noise/delete', { index: i }).then(loadProfiles);
 }
@@ -569,7 +594,11 @@ function updateGainLabel() { $('v_gain').textContent = $('micGain').value + '×'
 $('micGain').addEventListener('input', updateGainLabel);
 function saveScale() {
   post('/api/scale', { enabled: $('scEnabled').checked, autoTare: $('scAutoTare').checked,
-                       syncTimer: $('scSyncTimer').checked });
+                       syncTimer: $('scSyncTimer').checked, grindTare: $('scGrindTare').checked,
+                       portafilterG: parseFloat($('scPortafilter').value) || 0 });
+}
+function learnPortafilter() {
+  post('/api/scale/portafilter').then(j => { if (j && j.ok) scaleLoaded = false; });
 }
 function saveMic() { post('/api/mic', { gain: parseInt($('micGain').value) }); }
 
