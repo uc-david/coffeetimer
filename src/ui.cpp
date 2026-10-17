@@ -13,6 +13,7 @@
 #include "datetime.h"
 #include "net_manager.h"
 #include "scale.h"
+#include "vibration.h"
 
 namespace {
 
@@ -64,9 +65,14 @@ struct Button {
 Button btnTeach   {  4, kBtnY, 100, kBtnH, "TEACH",       kColAccent, kColDark, true};
 Button btnReset   {110, kBtnY, 100, kBtnH, "RESET",       kColLine,   kColText, true};
 Button btnInfo    {216, kBtnY, 100, kBtnH, "INFO",        kColLine,   kColText, true};
+// Waage (in der Gewichtszeile, nur wenn verbunden)
+Button btnScaleTare{  6, 143, 60, 24, "TARA",   kColLine, kColText, false};
+Button btnScaleTime{254, 143, 60, 24, "ZEIT 0", kColLine, kColText, false};
 
-Button btnLearnPump {  4, kBtnY, 100, kBtnH, "PUMPE",     kColAccent, kColDark, true};
-Button btnLearnNoise{110, kBtnY, 100, kBtnH, "STÖRGER.",  kColLine,   kColText, true};
+// Teach-Auswahl: Kacheln im Inhaltsbereich (Pumpe breit, darunter Mühle / Störgeräusch)
+Button btnLearnPump   {  8,  58, 304, 56, "PUMPE",    kColAccent, kColDark, true};
+Button btnLearnGrinder{  8, 122, 148, 56, "MÜHLE",    kColLine,   kColText, true};
+Button btnLearnNoise  {164, 122, 148, 56, "STÖRGER.", kColLine,   kColText, true};
 
 Button btnFinish  {  4, kBtnY, 100, kBtnH, "FERTIG",      kColOk,     kColDark, false};
 Button btnSave    {  4, kBtnY, 100, kBtnH, "SPEICHERN",   kColOk,     kColDark, false};
@@ -243,7 +249,10 @@ void drawMain() {
     statusTxt = "Pumpe läuft";
     statusCol = kColRun;
   } else if (snap.grinderOn) {
-    statusTxt = "Mühle läuft";
+    static char grindTxt[GrinderProfile::kNameLen + 8];
+    const bool named = snap.grinderActive >= 0 && snap.grinderActive < snap.grinderCount;
+    snprintf(grindTxt, sizeof(grindTxt), "%s läuft", named ? snap.grinderNames[snap.grinderActive] : "Mühle");
+    statusTxt = grindTxt;
     statusCol = kColAccent;
   } else if (snap.detector.rejected) {
     statusTxt = "Störgeräusch – ignoriert";
@@ -286,7 +295,7 @@ void drawMain() {
 
   // --- Waage (optional) bzw. letzte Bezüge ---------------------------------------
   if (snap.scaleEnabled) {
-    // Gewicht und (während des Bezugs) Durchfluss; Antippen = Tara
+    // Gewicht und (während des Bezugs) Durchfluss; links TARA, rechts ZEIT 0
     char buf[40];
     if (!isnan(snap.scaleWeight)) {
       if (snap.scaleDoseMode) {
@@ -305,6 +314,9 @@ void drawMain() {
     }
     canvas.setTextDatum(textdatum_t::middle_center);
     canvas.drawString(buf, kW / 2, 155);
+    btnScaleTare.visible = btnScaleTime.visible = snap.scaleConnected;
+    drawButton(btnScaleTare);
+    drawButton(btnScaleTime);
   } else if (snap.historyCount > 0) {
     String hist = "Zuletzt:";
     for (size_t i = 0; i < snap.historyCount && i < 4; ++i) {
@@ -328,16 +340,26 @@ void drawMain() {
   // Grün = Kriterium erfüllt; weiße Marke = Schwelle.
   struct Meter { const char* label; float value; float threshold; };
   const FrameScores& sc = d.scores;
-  Meter meters[3] = {{"Pegel", sc.levelRatio, st.levelThreshold}};
-  int count = 1;
-  if (d.periodic) {
-    meters[count++] = {"Takt", sc.periodicity, st.periodicityThreshold};
-    meters[count++] = {"Rhythmus", sc.rhythm, snap.profileRhythmTh};
-  } else {
-    meters[count++] = {"Muster", sc.similarity, st.similarityThreshold};
+  Meter meters[3];
+  int count = 0;
+  const bool useMic = snap.vibMode != static_cast<uint8_t>(vibration::Mode::Vib) || !snap.vibAvailable;
+  const bool useVib = snap.vibMode != static_cast<uint8_t>(vibration::Mode::Mic) && snap.vibAvailable;
+  if (useMic) {
+    meters[count++] = {"Pegel", sc.levelRatio, st.levelThreshold};
+    if (d.periodic) {
+      meters[count++] = {"Takt", sc.periodicity, st.periodicityThreshold};
+      if (!useVib) meters[count++] = {"Rhythmus", sc.rhythm, snap.profileRhythmTh};
+    } else {
+      meters[count++] = {"Muster", sc.similarity, st.similarityThreshold};
+    }
+  }
+  if (useVib) {
+    // Vibration über dem Ruhepegel; Marke = Schwelle (Mitte des Balkens)
+    const float over = snap.vibLevelDb - snap.vibBaselineDb;
+    meters[count++] = {"Vibration", over / (2.0f * snap.vibThresholdDb), 0.5f};
   }
   const int step = count == 3 ? 12 : 15;
-  int y = count == 3 ? 165 : 168;
+  int y = count == 3 ? 165 : count == 1 ? 175 : 168;
   for (int i = 0; i < count; ++i, y += step) {
     canvas.drawString(meters[i].label, 8, y + 4);
     drawBar(64, y + 1, 248, 6, meters[i].value, meters[i].threshold,
@@ -349,6 +371,15 @@ void drawMain() {
   drawButton(btnInfo);
 }
 
+const char* teachTitle(TeachMode m) {
+  switch (m) {
+    case TeachMode::Pump:       return "TEACH: PUMPE";
+    case TeachMode::Noise:      return "TEACH: STÖRGERÄUSCH";
+    case TeachMode::Grinder:    return "TEACH: MÜHLE";
+  }
+  return "TEACH";
+}
+
 void drawTeach() {
   const bool done = snap.teachPhase == TeachPhase::Done;
 
@@ -357,8 +388,7 @@ void drawTeach() {
     canvas.setFont(kFontBold);
     canvas.setTextColor(kColAccent);
     canvas.setTextDatum(textdatum_t::top_left);
-    canvas.drawString(snap.teachMode == TeachMode::Noise ? "TEACH: STÖRGERÄUSCH" : "TEACH: PUMPE",
-                      8, 34);
+    canvas.drawString(teachTitle(snap.teachMode), 8, 34);
 
     canvas.setFont(kFontText);
     canvas.setTextColor(kColText);
@@ -426,14 +456,20 @@ void drawTeach() {
   // Buttons je nach Phase
   // Ergebnis verwendbar: neues Profil speichern bzw. bestehendes ersetzen
   // oder ergänzen (z. B. Leerbezug + echter Bezug).
-  // Störgeräusch: nur speichern (wird an die Liste angehängt).
+  // Störgeräusch: speichern (neuer Eintrag).
   const bool usable = done && snap.teachResult.quality != TeachQuality::Error;
   const bool pumpMode = snap.teachMode == TeachMode::Pump;
   btnFinish.visible = snap.teachPhase == TeachPhase::RecordPump;
   btnSave.visible = usable;
   const bool learned = snap.profileValid && !snap.profileDefault;
-  btnSave.label = pumpMode && learned ? "ERSETZEN" : "SPEICHERN";
-  btnAdd.visible = usable && pumpMode && learned;
+  // Mühle: als neue Mühle speichern (solange Platz ist) oder der ähnlichsten ergänzen
+  const bool grinderMode = snap.teachMode == TeachMode::Grinder;
+  if (grinderMode && snap.grinderCount >= cfg::kMaxGrinders) btnSave.visible = false;
+  btnSave.label = pumpMode && learned                     ? "ERSETZEN"
+                  : grinderMode && snap.grinderCount > 0 ? "NEUE MÜHLE"
+                                                          : "SPEICHERN";
+  btnAdd.visible = usable && (pumpMode ? learned : grinderMode && snap.grinderCount > 0);
+  btnAdd.label = "ERGÄNZEN";
   btnRetry.visible = done && !btnAdd.visible;
   btnCancel.label = done ? "VERWERFEN" : "ABBRECHEN";
   drawButton(btnFinish);
@@ -443,24 +479,34 @@ void drawTeach() {
   drawButton(btnCancel);
 }
 
+/// Kachel mit Titel und kleinem Untertitel.
+void drawTile(const Button& b, const char* subtitle) {
+  if (!b.visible) return;
+  canvas.fillRoundRect(b.x, b.y, b.w, b.h, 8, b.color);
+  canvas.setTextColor(b.textColor);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  canvas.setFont(kFontBold);
+  canvas.drawString(b.label, b.x + b.w / 2, b.y + b.h / 2 - 8);
+  canvas.setFont(kFontSmall);
+  canvas.drawString(subtitle, b.x + b.w / 2, b.y + b.h / 2 + 12);
+}
+
 void drawTeachSelect() {
   canvas.setFont(kFontBold);
   canvas.setTextColor(kColAccent);
   canvas.setTextDatum(textdatum_t::top_left);
   canvas.drawString("Was soll gelernt werden?", 8, 34);
 
-  canvas.setFont(kFontText);
-  canvas.setTextColor(kColText);
-  int y = drawWrapped("PUMPE: Hintergrund aufnehmen, dann einen normalen Bezug machen.",
-                      8, 60, kW - 16, 20, 195);
-  drawWrapped(snap.profileValid
-                  ? "STÖRGERÄUSCH: z. B. Mühle laufen lassen – wird künftig ignoriert."
-                  : "STÖRGERÄUSCH: erst möglich, wenn die Pumpe eingelernt ist.",
-              8, y + 8, kW - 16, 20, 195);
+  drawTile(btnLearnPump, "Ruhe + Bezug");
+  char grinderInfo[24];
+  snprintf(grinderInfo, sizeof(grinderInfo), "%u gelernt", snap.grinderCount);
+  drawTile(btnLearnGrinder, snap.grinderCount ? grinderInfo : "mahlen lassen");
+  drawTile(btnLearnNoise, "z. B. Milch");
 
-  btnLearnNoise.visible = snap.profileValid;
-  drawButton(btnLearnPump);
-  drawButton(btnLearnNoise);
+  canvas.setFont(kFontSmall);
+  canvas.setTextColor(kColMuted);
+  canvas.setTextDatum(textdatum_t::top_left);
+  canvas.drawString("Jede Aufnahme misst zuerst 3 s Ruhe – Reihenfolge egal.", 8, 184);
   drawButton(btnBack);
 }
 
@@ -523,8 +569,8 @@ void drawInfo() {
 
 /// Einträge des Einstellungs-Screens.
 enum class SetItem {
-  Profile, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
-  Scale, ScaleAutoTare, ScaleTimer, ScaleTare, ScaleGrindTare, ScalePortafilter, Grinder,
+  Profile, Source, VibThreshold, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
+  Scale, ScaleAutoTare, ScaleTimer, ScaleGrindTare, ScalePortafilter, Grinder,
   Noise, Template, ClearHistory, ResetProfile
 };
 
@@ -532,7 +578,7 @@ constexpr int kSetRowY = 30;                                ///< erste Zeile
 constexpr int kSetRowH = 22;                                ///< Zeilenhöhe
 constexpr int kSetRows = 7;                                 ///< Zeilen je Seite
 constexpr int kSetPagerY = kSetRowY + kSetRows * kSetRowH;  ///< Blätter-Leiste
-constexpr int kMaxSetItems = 20;
+constexpr int kMaxSetItems = 22;
 
 Button btnMinus  {  4, kBtnY, 75, kBtnH, "-",       kColLine,   kColText, true};
 Button btnPlus   { 83, kBtnY, 75, kBtnH, "+",       kColLine,   kColText, true};
@@ -542,6 +588,7 @@ Button btnSetBack{241, kBtnY, 75, kBtnH, "ZURÜCK",  kColAccent, kColDark, true}
 int setSelected = 0;          ///< gewählter Eintrag
 int setPage = 0;              ///< aktuelle Seite
 uint8_t noiseSel = 0;         ///< gewähltes Störgeräusch (zum Löschen)
+uint8_t grinderSel = 0;       ///< gewählte Mühle (zum Löschen)
 uint8_t templateSel = 0;      ///< gewähltes Klangmuster (zum Löschen)
 SetItem confirmItem = SetItem::Profile;
 uint32_t confirmUntil = 0;    ///< Löschen erst nach zweitem Tippen bis zu diesem Zeitpunkt
@@ -553,6 +600,10 @@ constexpr uint8_t kGainSteps[] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
 int buildItems(SetItem* out) {
   int n = 0;
   out[n++] = SetItem::Profile;
+  if (snap.vibAvailable) {
+    out[n++] = SetItem::Source;
+    if (snap.vibMode != 0) out[n++] = SetItem::VibThreshold;
+  }
   out[n++] = SetItem::Level;
   if (snap.profilePeriodHz > 0.0f) {
     out[n++] = SetItem::Periodicity;
@@ -567,14 +618,11 @@ int buildItems(SetItem* out) {
   if (snap.scaleEnabled) {
     out[n++] = SetItem::ScaleAutoTare;
     out[n++] = SetItem::ScaleTimer;
-    out[n++] = SetItem::ScaleTare;
     out[n++] = SetItem::ScaleGrindTare;
     out[n++] = SetItem::ScalePortafilter;
   }
-  if (snap.noiseCount > 0) {
-    out[n++] = SetItem::Grinder;
-    out[n++] = SetItem::Noise;
-  }
+  if (snap.grinderCount > 0) out[n++] = SetItem::Grinder;
+  if (snap.noiseCount > 0) out[n++] = SetItem::Noise;
   if (!snap.profileDefault && snap.profileTemplates > 1) out[n++] = SetItem::Template;
   out[n++] = SetItem::ClearHistory;
   out[n++] = SetItem::ResetProfile;
@@ -584,6 +632,8 @@ int buildItems(SetItem* out) {
 const char* itemLabel(SetItem it) {
   switch (it) {
     case SetItem::Profile:      return "Profil";
+    case SetItem::Source:       return "Erkennung";
+    case SetItem::VibThreshold: return "Vibr.-Schwelle";
     case SetItem::Level:        return "Pegel-Schwelle";
     case SetItem::Similarity:   return "Muster-Schwelle";
     case SetItem::Periodicity:  return "Takt-Schwelle";
@@ -594,10 +644,9 @@ const char* itemLabel(SetItem it) {
     case SetItem::Scale:        return "Waage";
     case SetItem::ScaleAutoTare:return "Auto-Tara";
     case SetItem::ScaleTimer:   return "Waagen-Timer";
-    case SetItem::ScaleTare:    return "Waage tarieren";
     case SetItem::ScaleGrindTare: return "Mühlen-Tara";
     case SetItem::ScalePortafilter: return "Siebträger";
-    case SetItem::Grinder:      return "Mühle ist";
+    case SetItem::Grinder:      return "Mühle";
     case SetItem::Noise:        return "Störgeräusch";
     case SetItem::Template:     return "Klangmuster";
     case SetItem::ClearHistory: return "Historie";
@@ -608,17 +657,17 @@ const char* itemLabel(SetItem it) {
 
 /// Eintrag hat einen mit -/+ änderbaren Wert?
 bool hasValue(SetItem it) {
-  return it != SetItem::ClearHistory && it != SetItem::ResetProfile && it != SetItem::ScaleTare;
+  return it != SetItem::ClearHistory && it != SetItem::ResetProfile;
 }
 
 /// Eintrag hat eine Aktion (Löschen/Zurücksetzen)?
 bool hasAction(SetItem it) {
-  return it == SetItem::Noise || it == SetItem::Template || it == SetItem::ClearHistory ||
-         it == SetItem::ResetProfile || it == SetItem::ScaleTare || it == SetItem::ScalePortafilter;
+  return it == SetItem::Noise || it == SetItem::Grinder || it == SetItem::Template || it == SetItem::ClearHistory ||
+         it == SetItem::ResetProfile || it == SetItem::ScalePortafilter;
 }
 
 /// Aktionen, die ohne Sicherheitsabfrage sofort ausgeführt werden.
-bool isHarmless(SetItem it) { return it == SetItem::ScaleTare || it == SetItem::ScalePortafilter; }
+bool isHarmless(SetItem it) { return it == SetItem::ScalePortafilter; }
 
 String itemValue(SetItem it) {
   const DetectorSettings& st = snap.settings;
@@ -627,6 +676,10 @@ String itemValue(SetItem it) {
     case SetItem::Profile:
       snprintf(buf, sizeof(buf), "%u: %.14s", snap.activeSlot + 1, snap.profileName);
       break;
+    case SetItem::Source:
+      snprintf(buf, sizeof(buf), "%s", vibration::modeName(static_cast<vibration::Mode>(snap.vibMode)));
+      break;
+    case SetItem::VibThreshold: snprintf(buf, sizeof(buf), "+%.0f dB", snap.vibThresholdDb); break;
     case SetItem::Level:       snprintf(buf, sizeof(buf), "%.0f %%", st.levelThreshold * 100.0f); break;
     case SetItem::Similarity:  snprintf(buf, sizeof(buf), "%.0f %%", st.similarityThreshold * 100.0f); break;
     case SetItem::Periodicity: snprintf(buf, sizeof(buf), "%.0f %%", st.periodicityThreshold * 100.0f); break;
@@ -642,18 +695,8 @@ String itemValue(SetItem it) {
     case SetItem::ScaleGrindTare: snprintf(buf, sizeof(buf), scale::config().grindTare ? "an" : "aus"); break;
     case SetItem::ScalePortafilter: snprintf(buf, sizeof(buf), "%.1f g", scale::config().portafilterG); break;
     case SetItem::Grinder:
-      if (snap.grinderNoise < 0) {
-        snprintf(buf, sizeof(buf), "keine");
-      } else {
-        snprintf(buf, sizeof(buf), "Störg. %d%s", snap.grinderNoise + 1, snap.grinderOn ? " (läuft)" : "");
-      }
-      break;
-    case SetItem::ScaleTare:
-      if (isnan(snap.scaleWeight)) {
-        snprintf(buf, sizeof(buf), "-");
-      } else {
-        snprintf(buf, sizeof(buf), "%.1f g", snap.scaleWeight);
-      }
+      snprintf(buf, sizeof(buf), "%.12s (%u/%u)", snap.grinderNames[grinderSel], grinderSel + 1,
+               snap.grinderCount);
       break;
     case SetItem::Noise:       snprintf(buf, sizeof(buf), "%u von %u", noiseSel + 1, snap.noiseCount); break;
     case SetItem::Template:
@@ -672,6 +715,17 @@ void adjustItem(SetItem it, int dir) {
     case SetItem::Profile:
       app.cmdSelectSlot((snap.activeSlot + cfg::kProfileSlots + dir) % cfg::kProfileSlots);
       return;
+    case SetItem::Source:
+    case SetItem::VibThreshold: {
+      vibration::Config c = vibration::config();
+      if (it == SetItem::Source) {
+        c.mode = static_cast<vibration::Mode>((static_cast<int>(c.mode) + 3 + dir) % 3);
+      } else {
+        c.thresholdDb += dir;
+      }
+      vibration::setConfig(c);
+      return;
+    }
     case SetItem::Level:       s.levelThreshold += 0.05f * dir; break;
     case SetItem::Similarity:  s.similarityThreshold += 0.01f * dir; break;
     case SetItem::Periodicity: s.periodicityThreshold += 0.01f * dir; break;
@@ -708,8 +762,7 @@ void adjustItem(SetItem it, int dir) {
       return;
     }
     case SetItem::Grinder:
-      // keine -> Störg. 1 -> … -> letztes -> keine
-      app.cmdSetGrinder((snap.grinderNoise + 1 + dir + snap.noiseCount + 1) % (snap.noiseCount + 1) - 1);
+      if (snap.grinderCount) grinderSel = (grinderSel + snap.grinderCount + dir) % snap.grinderCount;
       return;
     case SetItem::Noise:
       if (snap.noiseCount) noiseSel = (noiseSel + snap.noiseCount + dir) % snap.noiseCount;
@@ -728,10 +781,10 @@ void adjustItem(SetItem it, int dir) {
 void runAction(SetItem it) {
   switch (it) {
     case SetItem::Noise:        app.cmdDeleteNoise(noiseSel); noiseSel = 0; break;
+    case SetItem::Grinder:      app.cmdDeleteGrinder(grinderSel); grinderSel = 0; break;
     case SetItem::Template:     app.cmdDeleteTemplate(templateSel); templateSel = 0; break;
     case SetItem::ClearHistory: app.cmdClearHistory(); break;
     case SetItem::ResetProfile: app.cmdDeleteSlot(snap.activeSlot); break;
-    case SetItem::ScaleTare:    scale::tare(); break;
     case SetItem::ScalePortafilter: scale::learnPortafilter(); break;
     default: break;
   }
@@ -744,6 +797,7 @@ void drawSettings() {
   const int pages = (n + kSetRows - 1) / kSetRows;
   setPage = constrain(setPage, 0, pages - 1);
   if (noiseSel >= snap.noiseCount) noiseSel = 0;
+  if (grinderSel >= snap.grinderCount) grinderSel = 0;
   if (templateSel >= snap.profileTemplates) templateSel = 0;
 
   // Zeilen: Bezeichnung links, Wert rechts; gewählte Zeile hinterlegt
@@ -778,7 +832,6 @@ void drawSettings() {
   const bool confirming = confirmItem == sel && millis() < confirmUntil;
   btnAction.label = confirming ? "SICHER?"
                   : sel == SetItem::ResetProfile ? "RESET"
-                  : sel == SetItem::ScaleTare    ? "TARA"
                   : sel == SetItem::ScalePortafilter ? "WIEGEN"
                                                  : "LÖSCHEN";
   btnAction.color = isHarmless(sel) ? kColAccent : kColErr;
@@ -822,6 +875,7 @@ void handleSettingsTouch(int x, int y) {
       confirmUntil = millis() + 3000;
     }
   } else if (btnSetBack.hit(x, y)) {
+    app.flushSettings();  // Änderungen beim Verlassen sofort sichern
     screen = Screen::Info;
   }
 }
@@ -846,8 +900,11 @@ void handleTouch() {
     case Screen::Main:
       if (btnTeach.hit(x, y)) {
         screen = Screen::TeachSelect;
-      } else if (snap.scaleConnected && y >= 144 && y < 166) {
-        scale::tare();  // Gewichtszeile antippen = tarieren
+      } else if (snap.scaleEnabled && btnScaleTare.hit(x, y)) {
+        scale::tare();
+      } else if (snap.scaleEnabled && btnScaleTime.hit(x, y)) {
+        scale::timerStop();
+        scale::timerReset();
       } else if (btnReset.hit(x, y)) {
         app.cmdResetTimer();
       } else if (btnInfo.hit(x, y)) {
@@ -855,17 +912,22 @@ void handleTouch() {
       }
       break;
 
-    case Screen::TeachSelect:
-      if (btnLearnPump.hit(x, y)) {
-        app.cmdStartTeach(TeachMode::Pump);
-        screen = Screen::Teach;
-      } else if (btnLearnNoise.hit(x, y)) {
-        app.cmdStartTeach(TeachMode::Noise);
-        screen = Screen::Teach;
-      } else if (btnBack.hit(x, y)) {
+    case Screen::TeachSelect: {
+      const struct { const Button& b; TeachMode m; } choices[] = {
+          {btnLearnPump, TeachMode::Pump},
+          {btnLearnGrinder, TeachMode::Grinder}, {btnLearnNoise, TeachMode::Noise}};
+      for (const auto& c : choices) {
+        if (c.b.hit(x, y)) {
+          app.cmdStartTeach(c.m);
+          screen = Screen::Teach;
+          return;
+        }
+      }
+      if (btnBack.hit(x, y)) {
         screen = Screen::Main;
       }
       break;
+    }
 
     case Screen::Teach:
       if (btnFinish.hit(x, y)) {

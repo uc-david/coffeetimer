@@ -36,11 +36,16 @@ struct FrameScores {
   float periodicity = 0.0f;      ///< Takt-Stärke beim Pumpentakt 0..1
   float rhythm = 0.0f;           ///< Ähnlichkeit der Rhythmus-Form zur Pumpe -1..1
   float levelRatio = 0.0f;       ///< Pegel relativ Hintergrund(0) .. Pumpe(1)
-  float noiseSimilarity = 0.0f;  ///< bestes Klangmuster eines Störgeräuschs
-  float noiseRhythm = -1.0f;     ///< beste Rhythmus-Form eines Störgeräuschs
-  float grinderSimilarity = 0.0f;  ///< Klangmuster des als Mühle markierten Störgeräuschs
-  float grinderRhythm = -1.0f;     ///< Rhythmus-Form der Mühle
-  int8_t noiseIndex = -1;          ///< ähnlichstes Störgeräusch (-1 = keines)
+  /// Ähnlichstes Störgeräusch ODER Mühle (beides wird bei der Pumpe ignoriert)
+  float noiseSimilarity = 0.0f;  ///< bestes Klangmuster
+  float noiseRhythm = -1.0f;     ///< beste Rhythmus-Form
+  bool hasNoise = false;         ///< mindestens ein Störgeräusch / eine Mühle verglichen
+  /// Ähnlichste Mühle
+  float grinderSimilarity = 0.0f;
+  float grinderRhythm = -1.0f;
+  int8_t grinderIndex = -1;      ///< -1 = keine Mühle gelernt
+  float grinderLevelRatio = 0.0f; ///< Pegel relativ zum Hintergrund (0) .. Mahlpegel (1) der Mühle
+  bool bestIsGrinder = false;    ///< eine Mühle passt besser als alle Störgeräusche
   float steadiness = 99.0f;      ///< Pegelschwankung in dB (klein = gleichmäßig)
 };
 
@@ -74,6 +79,7 @@ struct DetectorStatus {
   bool rawActive = false;    ///< unentprellte Einzelentscheidung des Frames
   bool rejected = false;     ///< klang nach Pumpe, aber eher nach Störgeräusch
   bool grinderOn = false;    ///< Mühle läuft (entprellt)
+  int8_t grinderIndex = -1;  ///< welche Mühle (solange grinderOn)
   bool periodic = false;     ///< Takt wird für die Erkennung genutzt
   FrameScores scores;
   float rmsDb = -90.0f;      ///< aktueller Pegel dBFS
@@ -87,8 +93,23 @@ class PumpDetector {
   void setProfile(const PumpProfile& p);
   void setNoise(const NoiseProfile& n) { noise_ = n; }
   void setSettings(const DetectorSettings& s) { settings_ = s; }
-  /// Welches Störgeräusch die Mühle ist (Index, -1 = keines).
-  void setGrinder(int8_t index) { grinder_ = index; }
+  /// Gelernte Mühlen (Zeiger bleibt gültig, Zugriff nur unter dem App-Mutex).
+  void setGrinders(const GrinderProfile* g) { grinders_ = g; }
+  /// Aktuelle Mikrofon-Verstärkung: Frames kommen unverändert, jedes Geräusch
+  /// rechnet auf die Verstärkung seiner eigenen Aufnahme um.
+  void setMicGain(float gain) { gain_ = gain; }
+
+  /// Quelle der Pumpenerkennung (siehe vibration::Mode).
+  enum class Source : uint8_t { Mic = 0, Vib = 1, Both = 2 };
+  /**
+   * Aktueller Zustand der Vibrationserkennung, vor jedem process() setzen.
+   * @param sinceMs  Beginn der lauten Vibrationsphase (für die Rückdatierung)
+   */
+  void setVibration(Source source, bool active, uint32_t sinceMs) {
+    source_ = source;
+    vibActive_ = active;
+    vibSinceMs_ = sinceMs;
+  }
 
   /// Setzt den entprellten Zustand zurück (z. B. nach dem Teach-Modus).
   void reset();
@@ -112,9 +133,14 @@ class PumpDetector {
 
   /// Berechnet alle Vergleichswerte eines Frames.
   /// @param steadiness  Ergebnis von SteadinessTracker::update()
-  /// @param grinder     Index des Störgeräuschs "Mühle" (-1 = keines)
+  /// @param g           gelernte Mühlen (optional)
+  /// @param gain        Mikrofon-Verstärkung, mit der bandDb/rmsDb aufgenommen wurden
   static FrameScores score(const float* bandDb, float rmsDb, const float* curve, float steadiness,
-                           const PumpProfile& p, const NoiseProfile& n, int grinder = -1);
+                           const PumpProfile& p, const NoiseProfile& n,
+                           const GrinderProfile* g, float gain);
+
+  /// Pegelkorrektur in dB, um eine Aufnahme mit currentGain auf learnedGain umzurechnen.
+  static float gainOffsetDb(float learnedGain, float currentGain);
 
   /// Gilt der Pegel als "laut" (Pumpe möglich)? Grundlage der Gleichmäßigkeit.
   static bool isLoud(float rmsDb, const PumpProfile& p, const DetectorSettings& st, bool hysteresis);
@@ -124,8 +150,8 @@ class PumpDetector {
    * @param hysteresis  true = Pumpe läuft bereits (etwas tolerantere Schwellen)
    * @param rejected    optional: true, wenn nur wegen Störgeräusch abgelehnt
    */
-  static bool matches(const FrameScores& s, const PumpProfile& p, const NoiseProfile& n,
-                      const DetectorSettings& st, bool hysteresis, bool* rejected = nullptr);
+  static bool matches(const FrameScores& s, const PumpProfile& p, const DetectorSettings& st,
+                      bool hysteresis, bool* rejected = nullptr);
 
   /**
    * Anteil eines Spektrums über dem Hintergrund, mittelwertfrei und auf Länge 1
@@ -138,9 +164,6 @@ class PumpDetector {
   /// Beste Kosinus-Ähnlichkeit eines Überschuss-Vektors zu einer Musterliste.
   static float bestTemplate(const float* excess, const float (*templates)[cfg::kNumBands],
                             size_t count);
-
-  /// Beste Klangmuster-Ähnlichkeit eines Spektrums zum Profil.
-  static float similarity(const float* bandDb, const PumpProfile& p);
 
   /// Pegel relativ zwischen Hintergrund (0) und Pumpen-Referenz (1).
   static float levelRatio(float rmsDb, const PumpProfile& p);
@@ -161,6 +184,9 @@ class PumpDetector {
    */
   static void mergeProfile(PumpProfile& into, const PumpProfile& from, String& note);
 
+  /// Ergänzt ein Störgeräusch um eine weitere Aufnahme (z. B. Mühle leer / mit Bohnen).
+  static void mergeNoise(NoiseProfile::Entry& into, const NoiseProfile::Entry& from);
+
  private:
   PumpProfile profile_;
   NoiseProfile noise_;
@@ -171,7 +197,11 @@ class PumpDetector {
   /// Mühle erkennen: lautes Geräusch, das dem Mühlen-Störgeräusch ähnlicher ist als der Pumpe.
   void updateGrinder(uint32_t now);
 
-  int8_t grinder_ = -1;
+  const GrinderProfile* grinders_ = nullptr;
+  float gain_ = cfg::kMicGainDefault;
+  Source source_ = Source::Mic;
+  bool vibActive_ = false;
+  uint32_t vibSinceMs_ = 0;
   uint32_t grinderSinceMs_ = 0;    ///< Beginn der aktuellen Mühlen-Phase (0 = keine)
   uint32_t grinderLastMs_ = 0;     ///< letzter Frame, der nach Mühle klang
 

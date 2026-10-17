@@ -49,9 +49,14 @@ constexpr size_t kAcfLen = kMaxLag - kMinLag + 1;
 /// sinkt unter Last leicht).
 constexpr float kLagTolerance = 0.03f;
 
-/// Glättungsfaktor (exponentieller Mittelwert) für Pegel und Bänder.
+/// Glättungsfaktor (exponentieller Mittelwert) für Pegel und Rhythmus-Kurve.
 /// 1.0 = keine Glättung; 0.5 ≈ Mittel über ~2 Schritte.
 constexpr float kSmoothing = 0.5f;
+
+/// Glättung der Frequenzbänder (Klangmuster): 0.25 ≈ Mittel über ~4 Schritte
+/// (~130 ms). Ein einzelnes 64-ms-Fenster eines rauschartigen Geräuschs streut
+/// je Band um mehrere dB – gemittelt wird das Muster deutlich trennschärfer.
+constexpr float kBandSmoothing = 0.25f;
 
 /// Gleichmäßigkeit: Pegelschwankung wird über so viele Frames (≈0,5 s) der
 /// aktuellen lauten Phase gemessen ...
@@ -59,8 +64,9 @@ constexpr size_t kSteadyFrames = 16;
 /// ... und erst ab so vielen Frames (≈0,25 s) bewertet.
 constexpr size_t kSteadyMinFrames = 8;
 
-/// Anzahl der logarithmisch verteilten Frequenzbänder des "Fingerabdrucks".
-constexpr size_t kNumBands = 24;
+/// Anzahl der logarithmisch verteilten Frequenzbänder des "Fingerabdrucks"
+/// (40 Bänder ≈ Drittel-Terz-Auflösung; bis Firmware 1.5: 24, wird beim Laden umgerechnet).
+constexpr size_t kNumBands = 40;
 
 /// Untere / obere Grenze des ausgewerteten Frequenzbereichs in Hz.
 constexpr float kBandMinHz = 80.0f;
@@ -77,10 +83,10 @@ constexpr uint32_t kWarmupFrames = 30;
 // ---------------------------------------------------------------------------
 
 /// Maximale Anzahl Klangmuster im Profil (z. B. Leerbezug + echter Bezug).
-constexpr size_t kMaxTemplates = 6;
+constexpr size_t kMaxTemplates = 8;
 
 /// Klangmuster je Teach-Aufnahme (z. B. Anlauf / Druckaufbau / voller Druck).
-constexpr size_t kTemplatesPerTeach = 3;
+constexpr size_t kTemplatesPerTeach = 4;
 
 /// Muster, die sich ähnlicher sind als dieser Wert, werden zusammengefasst.
 constexpr float kTemplateMergeSimilarity = 0.97f;
@@ -116,8 +122,13 @@ constexpr uint32_t kMaxPumpMsLearned = 120000; ///< gelerntes Profil
 /// Maximale Anzahl gelernter Störgeräusche (z. B. Mühle, Milchaufschäumer).
 constexpr size_t kMaxNoises = 3;
 
-/// Klangmuster je Störgeräusch.
-constexpr size_t kNoiseTemplates = 2;
+/// Maximale Anzahl gelernter Mühlen (eigene Liste, getrennt von den Störgeräuschen).
+constexpr size_t kMaxGrinders = 3;
+
+/// Klangmuster je Störgeräusch (Platz für Ergänzungen, z. B. Mühle leer / mit Bohnen) ...
+constexpr size_t kNoiseTemplates = 4;
+/// ... davon je Teach-Aufnahme.
+constexpr size_t kNoiseTemplatesPerTeach = 3;
 
 // ---------------------------------------------------------------------------
 // Teach-Modus
@@ -205,12 +216,19 @@ constexpr const char* kHostname = "coffeetimer";
 /// Zeit, die eine Verbindung mit dem gespeicherten WLAN versucht wird.
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 
+/// Ab diesem Zeitstempel (Unix-Sekunden) gilt die Systemzeit als gestellt (Jahr > 2020).
+constexpr int64_t kValidEpoch = 1600000000;
+
 /// Zeitzone für Uhrzeit-Anzeige und Historie (Mitteleuropa inkl. Sommerzeit).
 constexpr const char* kTimezone = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // ---------------------------------------------------------------------------
 // Anzeige
 // ---------------------------------------------------------------------------
+
+/// Geänderte Einstellungen werden erst gespeichert, wenn so lange nichts mehr
+/// verstellt wurde (mehrmaliges Tippen auf -/+ = ein Schreibvorgang).
+constexpr uint32_t kSettingsSaveDelayMs = 2000;
 
 /// Bildwiederholintervall des Displays.
 constexpr uint32_t kDisplayIntervalMs = 50;

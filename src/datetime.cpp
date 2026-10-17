@@ -14,9 +14,6 @@
 
 namespace {
 
-/// Ab diesem Zeitstempel gilt die Systemzeit als gestellt (Jahr > 2020).
-constexpr time_t kValidEpoch = 1600000000;
-
 /// Wird vom SNTP-Task gesetzt, in loop() abgearbeitet (I2C nur aus einem Task).
 std::atomic<bool> ntpSynced{false};
 
@@ -46,14 +43,14 @@ void begin() {
 void loop() {
   if (!ntpSynced.exchange(false)) return;
   const time_t now = time(nullptr);
-  if (now <= kValidEpoch || !M5.Rtc.isEnabled()) return;
+  if (now <= cfg::kValidEpoch || !M5.Rtc.isEnabled()) return;
   tm utc;
   gmtime_r(&now, &utc);
   M5.Rtc.setDateTime(&utc);  // RTC läuft in UTC (wie von M5.begin() erwartet)
   Serial.println("[time] NTP-Zeit in RTC übernommen");
 }
 
-bool valid() { return time(nullptr) > kValidEpoch; }
+bool valid() { return time(nullptr) > cfg::kValidEpoch; }
 
 void format(char* buf, size_t size) {
   if (size == 0) return;

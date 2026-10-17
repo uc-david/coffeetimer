@@ -17,6 +17,7 @@
  *   net_manager     WLAN / Access-Point / mDNS / NTP
  *   ota             Firmware-Update über WLAN (PlatformIO / Webseite)
  *   battery         Akkustand für Display und Webseite
+ *   vibration       Pumpenerkennung über den Beschleunigungssensor (optional)
  *   datetime        Uhrzeit/Datum, eingebaute RTC (per NTP gestellt)
  *   scale           optionale Bluetooth-Waage (Felicita, Acaia, Bookoo, Decent)
  *   settings        Persistenz im NVS
@@ -31,6 +32,7 @@
 #include "scale.h"
 #include "settings.h"
 #include "ui.h"
+#include "vibration.h"
 #include "web_server.h"
 
 void setup() {
@@ -46,6 +48,7 @@ void setup() {
   settings::begin();
   ui::begin();
   app.begin();
+  vibration::begin();  // Beschleunigungssensor (nur aktiv, wenn als Quelle gewählt)
   scale::begin();  // optionale Waage (Bluetooth nur, wenn eingeschaltet)
 
   WifiSettings wifi;
@@ -58,7 +61,9 @@ void setup() {
 void loop() {
   M5.update();  // Touch einlesen
   battery::loop();
+  vibration::loop();
   datetime::loop();
+  app.loop();  // verzögertes Speichern der Einstellungen
   ui::loop();
   net::loop();
   web::loop();

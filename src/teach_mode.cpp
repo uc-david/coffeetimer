@@ -153,27 +153,25 @@ void TeachController::begin() {
 }
 
 void TeachController::start(uint32_t nowMs, TeachMode mode, const DetectorSettings& current,
-                            const PumpProfile& profile, const NoiseProfile& noise) {
+                            const PumpProfile& profile, const NoiseProfile& noise,
+                            const GrinderProfile* grinders, float gain) {
   mode_ = mode;
+  grinders_ = grinders;
+  gain_ = gain;
   clearResult();
   settings_ = current;
   currentProfile_ = profile;
   currentNoise_ = noise;
-  bgCount_ = 0;
   pumpCount_ = 0;
   triggerFrames_ = 0;
   recordedMs_ = 0;
   finishRequested_ = false;
 
-  if (mode_ == TeachMode::Pump) {
-    bgRmsDb_ = -90.0f;
-    enterPhase(TeachPhase::Background, nowMs);
-  } else {
-    // Störgeräusch: Hintergrund ist aus dem Pumpenprofil bekannt.
-    bgRmsDb_ = profile.bgRmsDb;
-    enterPhase(TeachPhase::WaitPump, nowMs);
-    if (!profile.valid) fail("Bitte zuerst die Pumpe einlernen – Störgeräusche werden mit ihr verglichen.");
-  }
+  // Jedes Geräusch nimmt seine eigene Ruhe auf -> keine Abhängigkeit vom
+  // Hintergrund anderer Aufnahmen oder des Pumpenprofils.
+  bgCount_ = 0;
+  bgRmsDb_ = -90.0f;
+  enterPhase(TeachPhase::Background, nowMs);
   if (!bgFrames_ || !bgCurves_ || !pumpFrames_ || !pumpCurves_) {
     fail("Nicht genug Speicher für die Aufnahme (PSRAM).");
   }
@@ -198,6 +196,22 @@ void TeachController::enterPhase(TeachPhase p, uint32_t nowMs) {
   progress_ = 0.0f;
 }
 
+const char* TeachController::modeName(TeachMode m) {
+  switch (m) {
+    case TeachMode::Pump:       return "pump";
+    case TeachMode::Noise:      return "noise";
+    case TeachMode::Grinder:    return "grinder";
+  }
+  return "pump";
+}
+
+TeachMode TeachController::modeFromName(const char* name) {
+  for (TeachMode m : {TeachMode::Noise, TeachMode::Grinder}) {
+    if (strcmp(name, modeName(m)) == 0) return m;
+  }
+  return TeachMode::Pump;
+}
+
 const char* TeachController::phaseName(TeachPhase p) {
   switch (p) {
     case TeachPhase::Idle:       return "idle";
@@ -210,16 +224,22 @@ const char* TeachController::phaseName(TeachPhase p) {
 }
 
 const char* TeachController::instruction() const {
-  if (mode_ == TeachMode::Noise) {
+  const bool error = result_.quality == TeachQuality::Error;
+  if (isNoiseMode(mode_)) {
+    const bool grinder = mode_ == TeachMode::Grinder;
     switch (phase_) {
+      case TeachPhase::Background:
+        return grinder ? "Schritt 1/3: Ruhe bitte! Mühle und Maschine AUS – Hintergrund wird aufgenommen."
+                       : "Schritt 1/3: Ruhe bitte! Gerät noch AUS – Hintergrund wird aufgenommen.";
       case TeachPhase::WaitPump:
-        return "Schritt 1/2: Jetzt das Störgeräusch einschalten (z. B. Mühle mahlen lassen).";
+        return grinder ? "Schritt 2/3: Jetzt die MÜHLE mahlen lassen."
+                       : "Schritt 2/3: Jetzt das Störgeräusch einschalten (z. B. Milchaufschäumer).";
       case TeachPhase::RecordPump:
-        return "Schritt 2/2: Aufnahme läuft – Gerät normal laufen lassen, danach ausschalten.";
+        return grinder ? "Schritt 3/3: Aufnahme läuft – normal mahlen, danach ausschalten."
+                       : "Schritt 3/3: Aufnahme läuft – Gerät normal laufen lassen, danach ausschalten.";
       case TeachPhase::Done:
-        return result_.quality == TeachQuality::Error
-                   ? "Aufnahme nicht verwendbar – bitte wiederholen."
-                   : "Aufnahme fertig – Störgeräusch speichern?";
+        return error ? "Aufnahme nicht verwendbar – bitte wiederholen."
+                     : grinder ? "Aufnahme fertig – als Mühle speichern?" : "Aufnahme fertig – Störgeräusch speichern?";
       default:
         break;
     }
@@ -235,9 +255,8 @@ const char* TeachController::instruction() const {
       return "Schritt 3/3: Aufnahme läuft – Bezug wie gewohnt beenden. "
              "Endet automatisch, wenn die Pumpe aus ist.";
     case TeachPhase::Done:
-      return result_.quality == TeachQuality::Error
-                 ? "Aufnahme nicht verwendbar – bitte wiederholen."
-                 : "Aufnahme fertig – Profil ersetzen oder ergänzen.";
+      return error ? "Aufnahme nicht verwendbar – bitte wiederholen."
+                   : "Aufnahme fertig – Profil ersetzen oder ergänzen.";
   }
   return "";
 }
@@ -293,10 +312,10 @@ void TeachController::process(const AudioFrame& f, const float* curve) {
         fail("Nichts gehört: Der Pegel stieg in %u s nicht um mindestens %.0f dB über "
              "den Hintergrund (%.1f dBFS).",
              (unsigned)(cfg::kTeachWaitPumpTimeoutMs / 1000), cfg::kTeachPumpTriggerDb, bgRmsDb_);
-        result_.addMessage(mode_ == TeachMode::Pump
+        result_.addMessage(!isNoiseMode(mode_)
             ? "Tipp: Gerät näher an die Maschine stellen (Pumpe sitzt meist unten/hinten) und "
               "die Pumpe während Schritt 2 einschalten."
-            : "Tipp: Das Störgeräusch während Schritt 1 einschalten. Ist es sehr leise, stört "
+            : "Tipp: Das Geräusch während Schritt 2 einschalten. Ist es sehr leise, stört "
               "es die Erkennung ohnehin nicht.");
       }
       break;
@@ -316,7 +335,7 @@ void TeachController::process(const AudioFrame& f, const float* curve) {
         lastLoudIndex_ = pumpCount_;
       }
       // Störgeräusche (Mühle) haben keine Pre-Infusion -> kürzere Stille genügt.
-      const bool noise = mode_ == TeachMode::Noise;
+      const bool noise = isNoiseMode(mode_);
       const uint32_t silenceMs = noise ? cfg::kTeachNoiseStopSilenceMs : cfg::kTeachStopSilenceMs;
       const uint32_t maxMs = noise ? cfg::kTeachNoiseMaxMs : cfg::kTeachPumpMaxMs;
       progress_ = constrain(static_cast<float>(elapsed) / maxMs, 0.0f, 1.0f);
@@ -362,7 +381,7 @@ void TeachController::finishBackground() {
   const float clip = meanClip(bgFrames_, bgCount_);
   if (clip > cfg::kQualMaxClipRatio) {
     fail("Hintergrund übersteuert (%.1f %% der Samples) – lautes Störgeräusch während "
-         "Schritt 1. Pumpe aus? Bitte in Ruhe wiederholen.", clip * 100.0f);
+         "Schritt 1. Alles aus? Bitte in Ruhe wiederholen.", clip * 100.0f);
   }
 }
 
@@ -373,6 +392,7 @@ void TeachController::analyzePump() {
   TeachResult& r = result_;
   clearResult();
   PumpProfile& p = r.profile;
+  p.micGain = gain_;  // Frames kommen unverändert mit der aktuellen Verstärkung
 
   // Stille am Ende (Pumpe bereits aus) abschneiden.
   pumpCount_ = std::min(pumpCount_, lastLoudIndex_);
@@ -543,12 +563,12 @@ void TeachController::analyzePump() {
   for (size_t i : active) {
     loadCurve(&pumpCurves_[i * L], curve);
     pumpScores.push_back(PumpDetector::score(pumpFrames_[i].bandDb, pumpFrames_[i].rmsDb, curve,
-                                             pumpSteady[i], p, kNoNoise));
+                                             pumpSteady[i], p, kNoNoise, nullptr, gain_));
   }
   for (size_t i = 0; i < bgCount_; ++i) {
     loadCurve(&bgCurves_[i * L], curve);
     bgScores.push_back(PumpDetector::score(bgFrames_[i].bandDb, bgFrames_[i].rmsDb, curve,
-                                           bgSteady[i], p, kNoNoise));
+                                           bgSteady[i], p, kNoNoise, nullptr, gain_));
   }
   auto collect = [](const std::vector<FrameScores>& v, float FrameScores::*field) {
     std::vector<float> out;
@@ -616,16 +636,16 @@ void TeachController::analyzePump() {
   eval.periodicityThreshold = r.suggestedPeriodicity;
   size_t hits = 0, rejected = 0;
   for (size_t j = 0; j < active.size(); ++j) {
-    if (!PumpDetector::matches(pumpScores[j], p, kNoNoise, eval, false)) continue;
+    if (!PumpDetector::matches(pumpScores[j], p, eval, false)) continue;
     ++hits;
     // Würde ein bereits gelerntes Störgeräusch diesen Frame verwerfen?
     if (currentNoise_.count > 0) {
       const size_t i = active[j];
       loadCurve(&pumpCurves_[i * L], curve);
       const FrameScores sn = PumpDetector::score(pumpFrames_[i].bandDb, pumpFrames_[i].rmsDb,
-                                                 curve, pumpSteady[i], p, currentNoise_);
+                                                 curve, pumpSteady[i], p, currentNoise_, grinders_, gain_);
       bool rej = false;
-      PumpDetector::matches(sn, p, currentNoise_, eval, false, &rej);
+      PumpDetector::matches(sn, p, eval, false, &rej);
       if (rej) ++rejected;
     }
   }
@@ -633,7 +653,7 @@ void TeachController::analyzePump() {
   r.rejectedRatio = static_cast<float>(rejected) / active.size();
   size_t falseHits = 0;
   for (size_t i = 0; i < bgCount_; ++i) {
-    if (PumpDetector::matches(bgScores[i], p, kNoNoise, eval, false)) ++falseHits;
+    if (PumpDetector::matches(bgScores[i], p, eval, false)) ++falseHits;
   }
   r.falseRatio = bgCount_ ? static_cast<float>(falseHits) / bgCount_ : 0.0f;
 
@@ -766,12 +786,23 @@ void TeachController::analyzeNoise() {
   constexpr size_t L = cfg::kAcfLen;
   TeachResult& r = result_;
   clearResult();
-  const PumpProfile& p = currentProfile_;
+  const PumpProfile& p = currentProfile_;  // nur zur Bewertung: würde die Pumpe auslösen?
   NoiseProfile::Entry& e = r.noise;
+  const bool grinder = mode_ == TeachMode::Grinder;
+  const char* what = grinder ? "Mühle" : "Störgeräusch";
+
+  // Eigener Hintergrund (Schritt 1) und eigene Verstärkung des Geräuschs.
+  e.micGain = gain_;
+  rmsStats(bgFrames_, bgCount_, e.bgRmsDb, r.bgStdDb);
+  for (size_t b = 0; b < B; ++b) {
+    double sum = 0.0;
+    for (size_t i = 0; i < bgCount_; ++i) sum += bgFrames_[i].bandDb[b];
+    e.bgBandDb[b] = static_cast<float>(sum / std::max<size_t>(bgCount_, 1));
+  }
 
   // Stille am Ende abschneiden, hörbare Frames bestimmen.
   pumpCount_ = std::min(pumpCount_, lastLoudIndex_);
-  const float activeLimit = p.bgRmsDb + cfg::kTeachActiveDb;
+  const float activeLimit = e.bgRmsDb + cfg::kTeachActiveDb;
   std::vector<size_t> active;
   for (size_t i = 0; i < pumpCount_; ++i) {
     if (pumpFrames_[i].rmsDb >= activeLimit) active.push_back(i);
@@ -779,7 +810,7 @@ void TeachController::analyzeNoise() {
   r.activeSeconds = active.size() * cfg::kFrameSize / static_cast<float>(cfg::kSampleRate);
   r.clipRatio = meanClip(pumpFrames_, pumpCount_);
   if (r.activeSeconds * 1000.0f < cfg::kTeachNoiseMinActiveMs) {
-    fail("Störgeräusch nur %.1f s hörbar (mind. %.0f s nötig). Länger laufen lassen.",
+    fail("%s nur %.1f s hörbar (mind. %.0f s nötig). Länger laufen lassen.", what,
          r.activeSeconds, cfg::kTeachNoiseMinActiveMs / 1000.0f);
     return;
   }
@@ -794,15 +825,40 @@ void TeachController::analyzeNoise() {
   float curve[L];
   std::vector<float> meanCurve(L, 0.0f);
   for (size_t i : active) {
-    if (PumpDetector::excessVector(pumpFrames_[i].bandDb, p.bgBandDb, &vecs[nVecs * B]) > 0.0f) {
+    if (PumpDetector::excessVector(pumpFrames_[i].bandDb, e.bgBandDb, &vecs[nVecs * B]) > 0.0f) {
       ++nVecs;
     }
     loadCurve(&pumpCurves_[i * L], curve);
     for (size_t k = 0; k < L; ++k) meanCurve[k] += curve[k];
   }
   e.templateCount = static_cast<uint8_t>(
-      clusterTemplates(vecs, nVecs, cfg::kNoiseTemplates, e.templates));
+      clusterTemplates(vecs, nVecs, cfg::kNoiseTemplatesPerTeach, e.templates));
+  if (e.templateCount == 0) {
+    free(vecs);
+    fail("Kein verwertbares Klangmuster: %s hob sich kaum vom Hintergrund ab. Gerät näher "
+         "heranstellen bzw. während Schritt 1 wirklich Ruhe halten.", what);
+    return;
+  }
+
+  // Eigene Schwelle: so ähnlich ist das Geräusch seinen Mustern fast immer
+  // (5 %-Perzentil), mit etwas Reserve.
+  {
+    std::vector<float> sims;
+    sims.reserve(nVecs);
+    for (size_t i = 0; i < nVecs; ++i) {
+      sims.push_back(PumpDetector::bestTemplate(&vecs[i * B], e.templates, e.templateCount));
+    }
+    e.simThreshold = constrain(percentile(sims, 0.05f) - 0.05f, 0.5f, 0.95f);
+  }
   free(vecs);
+
+  // Eigener Pegel: leiser Teil des Geräuschs (10 %-Perzentil)
+  {
+    std::vector<float> levels;
+    levels.reserve(active.size());
+    for (size_t i : active) levels.push_back(pumpFrames_[i].rmsDb);
+    e.levelDb = percentile(levels, 0.10f);
+  }
   PumpDetector::normalizeCurve(meanCurve.data(), e.rhythm);
 
   // --- Wie oft wird es bisher bzw. künftig als Pumpe erkannt? ---------------
@@ -816,13 +872,15 @@ void TeachController::analyzeNoise() {
   }
   extended.entries[extended.count++] = e;
 
-  // Gleichmäßigkeit wie im Betrieb (zeitliche Reihenfolge aller Frames)
+  // Gleichmäßigkeit wie im Betrieb (zeitliche Reihenfolge aller Frames,
+  // Pegel in den Einheiten des Pumpenprofils)
+  const float pOff = PumpDetector::gainOffsetDb(p.micGain, gain_);
   std::vector<float> steady(pumpCount_);
   {
     SteadinessTracker tr;
     for (size_t i = 0; i < pumpCount_; ++i) {
       steady[i] = tr.update(pumpFrames_[i].rmsDb,
-                            PumpDetector::isLoud(pumpFrames_[i].rmsDb, p, settings_, false));
+                            PumpDetector::isLoud(pumpFrames_[i].rmsDb + pOff, p, settings_, false));
     }
   }
 
@@ -830,10 +888,10 @@ void TeachController::analyzeNoise() {
   for (size_t i : active) {
     loadCurve(&pumpCurves_[i * L], curve);
     const AudioFrame& f = pumpFrames_[i];
-    FrameScores s = PumpDetector::score(f.bandDb, f.rmsDb, curve, steady[i], p, currentNoise_);
-    if (PumpDetector::matches(s, p, currentNoise_, settings_, false)) ++before;
-    s = PumpDetector::score(f.bandDb, f.rmsDb, curve, steady[i], p, extended);
-    if (PumpDetector::matches(s, p, extended, settings_, false)) ++after;
+    FrameScores s = PumpDetector::score(f.bandDb, f.rmsDb, curve, steady[i], p, currentNoise_, grinders_, gain_);
+    if (PumpDetector::matches(s, p, settings_, false)) ++before;
+    s = PumpDetector::score(f.bandDb, f.rmsDb, curve, steady[i], p, extended, grinders_, gain_);
+    if (PumpDetector::matches(s, p, settings_, false)) ++after;
   }
   r.noiseHitBefore = static_cast<float>(before) / active.size();
   r.noiseHitAfter = static_cast<float>(after) / active.size();
@@ -852,14 +910,15 @@ void TeachController::analyzeNoise() {
   bool error = false, warning = false;
   if (r.clipRatio > cfg::kQualMaxClipRatio) {
     error = true;
-    r.addMessage("Übersteuert (%.1f %% der Samples) – Gerät weiter vom Störgeräusch entfernt "
-                 "aufnehmen.", r.clipRatio * 100.0f);
+    r.addMessage("Übersteuert (%.1f %% der Samples) – Gerät weiter entfernt aufnehmen.",
+                 r.clipRatio * 100.0f);
   }
   if (!error) {
-    r.addMessage("Bisher zu %.0f %% als Pumpe erkannt – mit diesem Störgeräusch: %.0f %%.",
+    r.addMessage("Bisher zu %.0f %% als Pumpe erkannt – mit dieser Aufnahme: %.0f %%.",
                  r.noiseHitBefore * 100.0f, r.noiseHitAfter * 100.0f);
   }
-  if (!error && r.noiseHitBefore < 0.02f) {
+  // Bei der Mühle ist Speichern immer nötig (Mühlen-Tara), daher nur beim Störgeräusch.
+  if (!error && !grinder && r.noiseHitBefore < 0.02f) {
     r.addMessage("Wurde ohnehin nicht als Pumpe erkannt – Speichern ist nicht nötig, schadet "
                  "aber nicht.");
   }
@@ -873,6 +932,24 @@ void TeachController::analyzeNoise() {
     r.addMessage("Klingt der Pumpe sehr ähnlich (Muster %.0f %%, Rhythmus %.0f %%) – die echte "
                  "Pumpe könnte ebenfalls ignoriert werden. Nach dem Speichern testen!",
                  specSim * 100.0f, rhySim * 100.0f);
+  }
+  // Mühle: ähnlichste vorhandene Mühle (Vorschlag zum Ergänzen)
+  if (mode_ == TeachMode::Grinder && grinders_) {
+    for (uint8_t gi = 0; gi < grinders_->count; ++gi) {
+      const NoiseProfile::Entry& ge = grinders_->entries[gi];
+      float sim = 0.0f;
+      for (size_t t = 0; t < e.templateCount; ++t) {
+        sim = std::max(sim, PumpDetector::bestTemplate(e.templates[t], ge.templates, ge.templateCount));
+      }
+      if (sim > r.grinderMatchSim) {
+        r.grinderMatchSim = sim;
+        r.grinderMatch = static_cast<int8_t>(gi);
+      }
+    }
+    if (r.grinderMatch >= 0) {
+      r.addMessage("Am ähnlichsten: %s (%.0f %%) – „Ergänzen“, wenn es dieselbe Mühle ist, sonst als "
+                   "neue Mühle speichern.", grinders_->names[r.grinderMatch], r.grinderMatchSim * 100.0f);
+    }
   }
   r.addMessage("%.1f s aufgenommen, %u Klangmuster.", r.activeSeconds, (unsigned)e.templateCount);
 

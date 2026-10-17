@@ -105,8 +105,6 @@ bool connected() { return WiFi.status() == WL_CONNECTED; }
 
 bool apActive() { return state == State::AccessPoint; }
 
-bool connecting() { return state == State::Connecting; }
-
 String ip() {
   if (connected()) return WiFi.localIP().toString();
   if (apActive()) return WiFi.softAPIP().toString();

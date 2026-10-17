@@ -28,8 +28,6 @@ bool connected();
 /// true, wenn der eigene Access-Point aktiv ist.
 bool apActive();
 
-/// true, solange die Verbindung zum Heim-WLAN aufgebaut wird.
-bool connecting();
 
 /// Aktuelle IP-Adresse (Heimnetz oder AP) als Text.
 String ip();

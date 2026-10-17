@@ -12,6 +12,7 @@
 #include "battery.h"
 #include "net_manager.h"
 #include "scale.h"
+#include "vibration.h"
 #include "ui.h"
 #include "web_page.h"
 
@@ -77,6 +78,9 @@ void handleStatus() {
   JsonObject live = doc["live"].to<JsonObject>();
   live["rmsDb"] = s.detector.rmsDb;
   live["grinderOn"] = s.grinderOn;
+  if (s.grinderOn && s.grinderActive >= 0 && s.grinderActive < s.grinderCount) {
+    live["grinderName"] = s.grinderNames[s.grinderActive];
+  }
   live["grinderSim"] = s.detector.scores.grinderSimilarity;
   live["noiseSim"] = s.detector.scores.noiseSimilarity;
   live["similarity"] = s.detector.scores.similarity;
@@ -103,7 +107,9 @@ void handleStatus() {
   prof["rhythmThreshold"] = s.profileRhythmTh;
   prof["steadyThreshold"] = s.profileSteadyTh;
   prof["noiseCount"] = s.noiseCount;
-  prof["grinder"] = s.grinderNoise;
+  prof["maxGrinders"] = cfg::kMaxGrinders;
+  JsonArray grinders = prof["grinders"].to<JsonArray>();
+  for (uint8_t i = 0; i < s.grinderCount; ++i) grinders.add(s.grinderNames[i]);
 
   fillSettings(doc["settings"].to<JsonObject>(), s.settings);
 
@@ -118,7 +124,7 @@ void handleStatus() {
 
   JsonObject teach = doc["teach"].to<JsonObject>();
   teach["phase"] = TeachController::phaseName(s.teachPhase);
-  teach["mode"] = s.teachMode == TeachMode::Noise ? "noise" : "pump";
+  teach["mode"] = TeachController::modeName(s.teachMode);
   teach["progress"] = s.teachProgress;
   teach["recordedMs"] = s.teachRecordedMs;
   teach["instruction"] = s.teachInstruction;
@@ -150,6 +156,8 @@ void handleStatus() {
     res["rejectedRatio"] = r.rejectedRatio;
     res["noiseHitBefore"] = r.noiseHitBefore;
     res["noiseHitAfter"] = r.noiseHitAfter;
+    res["grinderMatch"] = r.grinderMatch;
+    res["grinderMatchSim"] = r.grinderMatchSim;
     res["templates"] = r.profile.templateCount;
     res["periodHz"] = r.profile.periodHz();
     res["suggestedSimilarity"] = r.suggestedSimilarity;
@@ -182,6 +190,15 @@ void handleStatus() {
   sc["flow"] = s.scaleFlow;
   sc["battery"] = s.scaleBattery;
   sc["name"] = scale::deviceName();
+
+  JsonObject vib = doc["vibration"].to<JsonObject>();
+  vib["available"] = s.vibAvailable;
+  vib["mode"] = s.vibMode;
+  vib["thresholdDb"] = s.vibThresholdDb;
+  vib["levelDb"] = s.vibLevelDb;
+  vib["baselineDb"] = s.vibBaselineDb;
+  vib["steadiness"] = fminf(s.vibSteadiness, 20.0f);
+  vib["active"] = s.vibActive;
 
   JsonObject mic = doc["mic"].to<JsonObject>();
   mic["gain"] = s.micGain;
@@ -306,6 +323,7 @@ void handleProfiles() {
     o["recordings"] = s.recordings;
     o["templates"] = s.templates;
     o["noise"] = s.noiseCount;
+    o["grinders"] = s.grinderCount;
     o["periodHz"] = s.periodHz;
     o["quality"] = s.quality;
   }
@@ -362,11 +380,10 @@ void begin() {
   server.on("/api/settings", HTTP_POST, handlePostSettings);
 
   server.on("/api/teach/start", HTTP_POST, [] {
-    // Body {"mode": "pump" | "noise"}
+    // Body {"mode": "pump" | "noise" | "grinder" | "background"}
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
-    const bool noise = strcmp(in["mode"] | "pump", "noise") == 0;
-    app.cmdStartTeach(noise ? TeachMode::Noise : TeachMode::Pump);
+    app.cmdStartTeach(TeachController::modeFromName(in["mode"] | "pump"));
     sendOk();
   });
   // Profil-Slots
@@ -431,17 +448,39 @@ void begin() {
     snprintf(msg, sizeof(msg), "Siebträger: %.1f g", scale::config().portafilterG);
     sendOk(true, msg);
   });
-  // Welches Störgeräusch ist die Mühle? Body {"index": n}, -1 = keines
-  server.on("/api/grinder", HTTP_POST, [] {
+  // Mühlen: löschen {"index": n} bzw. umbenennen {"index": n, "name": "..."}
+  server.on("/api/grinders/delete", HTTP_POST, [] {
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
-    const bool ok = app.cmdSetGrinder(in["index"] | -1);
-    sendOk(ok, ok ? "Mühle gespeichert" : "Störgeräusch nicht vorhanden");
+    const bool ok = app.cmdDeleteGrinder(in["index"] | 255);
+    sendOk(ok, ok ? "Mühle gelöscht" : "Löschen fehlgeschlagen");
+  });
+  server.on("/api/grinders/rename", HTTP_POST, [] {
+    JsonDocument in;
+    deserializeJson(in, server.arg("plain"));
+    const bool ok = app.cmdRenameGrinder(in["index"] | 255, in["name"] | "");
+    sendOk(ok, ok ? "Umbenannt" : "Umbenennen fehlgeschlagen");
+  });
+  server.on("/api/scale/timer-reset", HTTP_POST, [] {
+    if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");
+    scale::timerStop();
+    scale::timerReset();
+    sendOk(true, "Timer der Waage auf 0");
   });
   server.on("/api/scale/tare", HTTP_POST, [] {
     if (!scale::connected()) return sendOk(false, "Waage nicht verbunden");
     scale::tare();
     sendOk(true, "Tariert");
+  });
+  // Erkennungsquelle: Body {"mode": 0|1|2, "thresholdDb": x}
+  server.on("/api/vibration", HTTP_POST, [] {
+    JsonDocument in;
+    if (deserializeJson(in, server.arg("plain"))) return sendOk(false, "Ungültiges JSON");
+    vibration::Config c = vibration::config();
+    c.mode = static_cast<vibration::Mode>(in["mode"] | static_cast<int>(c.mode));
+    c.thresholdDb = in["thresholdDb"] | c.thresholdDb;
+    vibration::setConfig(c);
+    sendOk(true, (String("Erkennung: ") + vibration::modeName(vibration::config().mode)).c_str());
   });
   server.on("/api/mic", HTTP_POST, [] {
     JsonDocument in;

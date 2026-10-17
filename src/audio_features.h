@@ -5,7 +5,7 @@
  * Alle 32 ms (ein Aufnahme-Block) wird ein 64 ms langes Fenster (die letzten
  * zwei Blöcke) ausgewertet:
  *  - Gesamtpegel in dBFS
- *  - Energie in 24 logarithmisch verteilten Frequenzbändern (dB) –
+ *  - Energie in cfg::kNumBands logarithmisch verteilten Frequenzbändern (dB) –
  *    der "akustische Fingerabdruck" (Klangmuster)
  *  - Autokorrelation der Hüllkurve: Wie stark wiederholt sich der
  *    Lautstärkeverlauf nach einer bestimmten Zeit? Vibrationspumpen schlagen
@@ -53,9 +53,6 @@ class FeatureExtractor {
    * Täler dazwischen, ein brummender Motor (100 Hz) zusätzlich bei 10/30 ms.
    */
   const float* acfCurve() const { return acf_ + cfg::kMinLag; }
-
-  /// Mittenfrequenz eines Bandes in Hz (für Anzeige / Debug).
-  float bandCenterHz(size_t band) const;
 
  private:
   /// In-place Radix-2-FFT (Cooley-Tukey) der ersten n Werte von re_/im_.

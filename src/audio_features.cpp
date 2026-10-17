@@ -44,11 +44,6 @@ void FeatureExtractor::begin() {
   primed_ = false;
 }
 
-float FeatureExtractor::bandCenterHz(size_t band) const {
-  const float binHz = static_cast<float>(cfg::kSampleRate) / cfg::kWindowSize;
-  return 0.5f * (bandStart_[band] + bandStart_[band + 1]) * binHz;
-}
-
 void FeatureExtractor::process(const int16_t* samples, AudioFrame& out) {
   const size_t w = cfg::kWindowSize;
   const size_t hop = cfg::kFrameSize;
@@ -135,10 +130,11 @@ void FeatureExtractor::process(const int16_t* samples, AudioFrame& out) {
     smoothPower_ = power;
     primed_ = true;
   } else {
-    const float a = cfg::kSmoothing;
+    const float ab = cfg::kBandSmoothing;
     for (size_t b = 0; b < cfg::kNumBands; ++b) {
-      smoothBand_[b] = a * bandPower[b] + (1.0f - a) * smoothBand_[b];
+      smoothBand_[b] = ab * bandPower[b] + (1.0f - ab) * smoothBand_[b];
     }
+    const float a = cfg::kSmoothing;
     smoothPower_ = a * power + (1.0f - a) * smoothPower_;
   }
   for (size_t b = 0; b < cfg::kNumBands; ++b) {

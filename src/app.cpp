@@ -5,9 +5,13 @@
 #include "app.h"
 
 #include <M5Unified.h>
+#include <esp_heap_caps.h>
 #include <math.h>
 
+#include <new>
+
 #include "scale.h"
+#include "vibration.h"
 
 App app;
 
@@ -20,6 +24,7 @@ constexpr BaseType_t kAudioTaskCore = 0;  // Core 1 gehört loop() (Display/Web)
 
 void App::begin() {
   mutex_ = xSemaphoreCreateMutex();
+  detector_.setGrinders(&grinders_);  // Zeiger bleibt gültig, Inhalt wechselt mit dem Slot
 
   activeSlot_ = settings::loadActiveSlot();
   micGain_ = settings::loadMicGain();
@@ -45,6 +50,16 @@ void App::begin() {
 
   xTaskCreatePinnedToCore(audioTaskEntry, "audio", kAudioTaskStack, this,
                           kAudioTaskPriority, nullptr, kAudioTaskCore);
+}
+
+void App::loop() {
+  // Schneller Vorab-Check ohne Mutex; Details unter dem Mutex in flushSettings()
+  if (settingsDirty_ && millis() - settingsChangedMs_ >= cfg::kSettingsSaveDelayMs) flushSettings();
+}
+
+void App::flushSettings() {
+  Lock lock(mutex_);
+  if (settingsDirty_) persistLocked();  // setzt settingsDirty_ zurück
 }
 
 void App::audioTaskEntry(void* arg) {
@@ -107,15 +122,9 @@ void App::handleFrame(AudioFrame& f) {
   ++audioFrames_;
   clipPeak_ = fmaxf(f.clipRatio, clipPeak_ * 0.97f);  // Spitzenwert, klingt in ~1 s ab
 
-  // Wurde das Profil mit einer anderen Mikrofon-Verstärkung gelernt, die
-  // Pegel umrechnen (gleiche Verschiebung für Gesamtpegel und alle Bänder).
-  // Ausnahme: Pumpen-Teach – dort wird mit der aktuellen Verstärkung gelernt.
-  const bool pumpTeach = teach_.engaged() && teach_.mode() == TeachMode::Pump;
-  if (!pumpTeach && profile_.micGain > 0.0f && profile_.micGain != micGain_) {
-    const float offset = 20.0f * log10f(profile_.micGain / micGain_);
-    f.rmsDb += offset;
-    for (float& b : f.bandDb) b += offset;
-  }
+  // Frames bleiben unverändert (aktuelle Verstärkung). Jedes Geräusch – Pumpe,
+  // Mühle, Störgeräusch – rechnet selbst auf die Verstärkung seiner Aufnahme um.
+  detector_.setMicGain(micGain_);
 
   // Während des Teach-Modus (inkl. Ergebnisanzeige) ruht die Erkennung,
   // damit das Lernen nicht versehentlich Bezüge auslöst.
@@ -125,6 +134,10 @@ void App::handleFrame(AudioFrame& f) {
     return;
   }
 
+  const vibration::Status vib = vibration::status();
+  const auto source = vib.available ? static_cast<PumpDetector::Source>(vibration::config().mode)
+                                    : PumpDetector::Source::Mic;
+  detector_.setVibration(source, vib.active, vib.sinceMs);
   const PumpDetector::Event ev = detector_.process(f, extractor_.acfCurve());
   const DetectorStatus& st = detector_.status();
   if (st.rejected) ++rejectedFrames_;
@@ -155,7 +168,7 @@ void App::handleFrame(AudioFrame& f) {
       // Diagnose-Eintrag abschließen
       current_.durationMs = detector_.lastActiveMs() - detector_.onsetMs();
       const time_t now = time(nullptr);
-      current_.endEpoch = now > 1600000000 ? now : 0;
+      current_.endEpoch = now > cfg::kValidEpoch ? now : 0;
       if (current_.frames > 0) {
         FrameScores& m = current_.mean;
         const float n = current_.frames;
@@ -176,6 +189,7 @@ void App::handleFrame(AudioFrame& f) {
         if (timer_.lastStopRecorded() && !isnan(scale::weight())) {
           timer_.setLatestWeight(scale::weight());
           weightUntilMs_ = f.timestampMs + cfg::kWeightSettleMs;
+          weightTares_ = scale::tareCount();
         }
         // Vorher gewogenes Kaffeemehl diesem Bezug zuordnen (einmalig)
         if (timer_.lastStopRecorded() && !isnan(doseG_)) {
@@ -186,10 +200,12 @@ void App::handleFrame(AudioFrame& f) {
       break;
     }
     case PumpDetector::Event::None:
-      // Nachtropfen: Gewicht des letzten Bezugs noch einige Sekunden aktualisieren
+      // Nachtropfen: Gewicht des letzten Bezugs noch einige Sekunden aktualisieren –
+      // nicht mehr nach einer Tara (RESET, TARA, Mühle), sonst stünde dort 0 g.
       if (weightUntilMs_) {
         const float w = scale::weight();
-        if (static_cast<int32_t>(f.timestampMs - weightUntilMs_) < 0 && !isnan(w)) {
+        const bool tared = scale::tareCount() != weightTares_;
+        if (!tared && static_cast<int32_t>(f.timestampMs - weightUntilMs_) < 0 && !isnan(w)) {
           timer_.setLatestWeight(w);
         } else {
           weightUntilMs_ = 0;
@@ -202,7 +218,8 @@ void App::handleFrame(AudioFrame& f) {
 void App::handleGrinder(const AudioFrame& f) {
   const bool on = detector_.status().grinderOn;
   if (on && !grinderWasOn_) {
-    Serial.println("[detect] Mühle läuft");
+    const int8_t gi = detector_.status().grinderIndex;
+    Serial.printf("[detect] %s läuft\n", gi >= 0 && gi < grinders_.count ? grinders_.names[gi] : "Mühle");
     ++grinderStarts_;
     // Nachmahlen (Dosier-Tara läuft noch) nicht neu tarieren – die Waage ist
     // dann ggf. schon mit der ersten Portion belegt worden.
@@ -276,6 +293,10 @@ void App::diagnosticsText(String& out) {
   add("Firmware %s, Laufzeit %lu min, Frames %lu, als Stoergeraeusch verworfen: %lu",
       cfg::kFirmwareVersion, (unsigned long)(millis() / 60000), (unsigned long)audioFrames_,
       (unsigned long)rejectedFrames_);
+  add("Speicher frei: intern %u kB (min %u kB), PSRAM %u kB",
+      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+      (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
   const PumpProfile& p = profile_;
   add("Profil: gueltig=%d Aufnahmen=%u Muster=%u Takt=%d (%.1f Hz, Lag %.0f) RhythmusSchwelle=%.2f "
@@ -292,8 +313,22 @@ void App::diagnosticsText(String& out) {
   if (!lastNoiseTeach_.isEmpty()) out += "Teach Stoer: " + lastNoiseTeach_ + "\n";
 
   scale::diagnostics(out);
-  add("Muehle: Stoergeraeusch %d, erkannt %lu x, Dosier-Tara %s, Dosis %.1f g", grinder_ + 1,
-      (unsigned long)grinderStarts_, scale::doseMode() ? "aktiv" : "aus", doseG_);
+  {
+    const vibration::Status v = vibration::status();
+    add("Vibration: Modus %s, Sensor %s, Pegel %.1f dB, Ruhepegel %.1f dB, Schwelle +%.1f dB, "
+        "Schwankung %.1f dB, aktiv=%d", vibration::modeName(vibration::config().mode),
+        v.available ? "ok" : "fehlt", v.levelDb, v.baselineDb, vibration::config().thresholdDb,
+        fminf(v.steadiness, 20.0f), v.active);
+  }
+  {
+    String names;
+    for (uint8_t i = 0; i < grinders_.count; ++i) {
+      names += (i ? ", " : "") + String(grinders_.names[i]) + " (" +
+               String(grinders_.entries[i].templateCount) + " Muster)";
+    }
+    add("Muehlen: %u [%s], erkannt %lu x, Dosier-Tara %s, Dosis %.1f g", grinders_.count,
+        names.c_str(), (unsigned long)grinderStarts_, scale::doseMode() ? "aktiv" : "aus", doseG_);
+  }
 
   out += "\nJetzt:\n";
   scores("live", detector_.status().scores);
@@ -335,9 +370,22 @@ void App::snapshot(StatusSnapshot& out) {
   out.scaleBattery = scale::battery();
   out.scaleDoseMode = scale::doseMode();
   out.doseG = doseG_;
-  out.grinderNoise = grinder_;
+  out.grinderCount = grinders_.count;
+  memcpy(out.grinderNames, grinders_.names, sizeof(out.grinderNames));
+  out.grinderActive = detector_.status().grinderIndex;
   out.grinderOn = detector_.status().grinderOn;
   out.clipRatio = clipPeak_;
+  {
+    const vibration::Status v = vibration::status();
+    const vibration::Config vc = vibration::config();
+    out.vibMode = static_cast<uint8_t>(vc.mode);
+    out.vibAvailable = v.available;
+    out.vibActive = v.active;
+    out.vibLevelDb = v.levelDb;
+    out.vibBaselineDb = v.baselineDb;
+    out.vibThresholdDb = vc.thresholdDb;
+    out.vibSteadiness = v.steadiness;
+  }
 
   out.profileValid = profile_.valid;
   out.profileBgDb = profile_.bgRmsDb;
@@ -388,7 +436,7 @@ void App::cmdStartTeach(TeachMode mode) {
   }
   timer_.reset();
   detector_.reset();
-  teach_.start(millis(), mode, settings_, ref, noise_);
+  teach_.start(millis(), mode, settings_, ref, noise_, &grinders_, micGain_);
   Serial.println("[teach] gestartet");
 }
 
@@ -414,9 +462,11 @@ bool App::cmdSaveTeach(bool add, String* note) {
 
   // Kennwerte für den Diagnosebericht merken.
   char info[220];
-  if (r.mode == TeachMode::Noise) {
-    snprintf(info, sizeof(info), "vorher %.0f%% nachher %.0f%% (%.1f s)", r.noiseHitBefore * 100.0f,
-             r.noiseHitAfter * 100.0f, r.activeSeconds);
+  if (isNoiseMode(r.mode)) {
+    snprintf(info, sizeof(info), "%s: vorher %.0f%% nachher %.0f%% (%.1f s) bg %.1f dB pegel %.1f dB "
+             "schwelle %.2f", r.mode == TeachMode::Grinder ? "Muehle" : "Stoer", r.noiseHitBefore * 100.0f,
+             r.noiseHitAfter * 100.0f, r.activeSeconds, r.noise.bgRmsDb, r.noise.levelDb,
+             r.noise.simThreshold);
     lastNoiseTeach_ = info;
   } else {
     snprintf(info, sizeof(info),
@@ -428,7 +478,31 @@ bool App::cmdSaveTeach(bool add, String* note) {
     lastPumpTeach_ = info;
   }
 
-  if (r.mode == TeachMode::Noise) {
+  if (r.mode == TeachMode::Grinder) {
+    // Mühle: neue Mühle anlegen oder einer vorhandenen hinzufügen (ähnlichste
+    // bzw. wenn die Liste voll ist)
+    GrinderProfile& g = grinders_;
+    const bool full = g.count >= cfg::kMaxGrinders;
+    if ((add || full) && g.count > 0) {
+      const uint8_t target = r.grinderMatch >= 0 && r.grinderMatch < g.count ? r.grinderMatch : 0;
+      PumpDetector::mergeNoise(g.entries[target], r.noise);
+      msg = String(g.names[target]) + " ergänzt (" + String(g.entries[target].templateCount) +
+            " Klangmuster)" + (full && !add ? " – Liste voll" : "");
+    } else {
+      const uint8_t i = g.count++;
+      g.entries[i] = r.noise;
+      snprintf(g.names[i], GrinderProfile::kNameLen, "Mühle %u", (unsigned)(i + 1));
+      msg = String(g.names[i]) + " gespeichert";
+    }
+    detector_.reset();
+    teach_.cancel();
+    if (!persistLocked()) msg = "FEHLER: Mühle konnte nicht gespeichert werden!";
+    Serial.printf("[teach] %s\n", msg.c_str());
+    if (note) *note = msg;
+    return true;
+  }
+
+  if (isNoiseMode(r.mode)) {
     // Störgeräusch anhängen; ist die Liste voll, fällt das älteste heraus.
     if (noise_.count >= cfg::kMaxNoises) {
       memmove(&noise_.entries[0], &noise_.entries[1],
@@ -439,8 +513,9 @@ bool App::cmdSaveTeach(bool add, String* note) {
     detector_.setNoise(noise_);
     detector_.reset();
     teach_.cancel();
-    msg = persistLocked() ? "Störgeräusch gespeichert (" + String(noise_.count) + " gelernt)"
-                          : String("FEHLER: Störgeräusch konnte nicht gespeichert werden!");
+    const bool ok = persistLocked();
+    msg = ok ? "Störgeräusch gespeichert (" + String(noise_.count) + " gelernt)"
+             : String("FEHLER: Störgeräusch konnte nicht gespeichert werden!");
     Serial.printf("[teach] %s\n", msg.c_str());
     if (note) *note = msg;
     return true;
@@ -452,7 +527,7 @@ bool App::cmdSaveTeach(bool add, String* note) {
     // die Mikrofon-Verstärkung des bestehenden Profils umrechnen.
     static PumpProfile incoming;
     incoming = r.profile;
-    const float offset = 20.0f * log10f(profile_.micGain / micGain_);
+    const float offset = PumpDetector::gainOffsetDb(profile_.micGain, r.profile.micGain);
     incoming.bgRmsDb += offset;
     incoming.pumpRmsDb += offset;
     for (float& b : incoming.bgBandDb) b += offset;
@@ -466,7 +541,7 @@ bool App::cmdSaveTeach(bool add, String* note) {
   } else {
     // Ersetzen: Profil und Schwellen komplett aus der Aufnahme übernehmen.
     profile_ = r.profile;
-    profile_.micGain = micGain_;  // gelernt mit der aktuellen Verstärkung
+    // micGain kommt aus der Aufnahme (Verstärkung beim Teach)
     settings_.similarityThreshold = r.suggestedSimilarity;
     settings_.periodicityThreshold = r.suggestedPeriodicity;
     msg = "Profil gespeichert";
@@ -486,22 +561,30 @@ bool App::cmdSaveTeach(bool add, String* note) {
   return true;
 }
 
-bool App::cmdSetGrinder(int8_t index) {
+bool App::cmdDeleteGrinder(uint8_t index) {
   Lock lock(mutex_);
-  if (index >= (int8_t)noise_.count) return false;
-  grinder_ = index < 0 ? -1 : index;
-  settings::saveGrinder(activeSlot_, grinder_);
-  detector_.setGrinder(grinder_);
-  Serial.printf("[profil] Mühle = Störgeräusch %d\n", grinder_ + 1);
-  return true;
+  GrinderProfile& g = grinders_;
+  if (index >= g.count) return false;
+  memmove(&g.entries[index], &g.entries[index + 1], sizeof(g.entries[0]) * (g.count - index - 1));
+  memmove(g.names[index], g.names[index + 1], sizeof(g.names[0]) * (g.count - index - 1));
+  --g.count;
+  detector_.reset();
+  Serial.printf("[profil] Mühle %u gelöscht\n", index + 1);
+  return persistLocked();
+}
+
+bool App::cmdRenameGrinder(uint8_t index, const String& name) {
+  Lock lock(mutex_);
+  String n = name;
+  n.trim();
+  if (index >= grinders_.count || n.isEmpty()) return false;
+  strlcpy(grinders_.names[index], n.c_str(), GrinderProfile::kNameLen);
+  return persistLocked();
 }
 
 void App::cmdClearNoise() {
   Lock lock(mutex_);
   noise_.count = 0;
-  grinder_ = -1;
-  settings::saveGrinder(activeSlot_, grinder_);
-  detector_.setGrinder(grinder_);
   persistLocked();
   detector_.setNoise(noise_);
   Serial.println("[teach] Störgeräusche gelöscht");
@@ -514,11 +597,6 @@ bool App::cmdDeleteNoise(uint8_t index) {
           sizeof(NoiseProfile::Entry) * (noise_.count - index - 1));
   --noise_.count;
   detector_.setNoise(noise_);
-  // Markierung "Mühle" mitverschieben
-  if (grinder_ == (int8_t)index) grinder_ = -1;
-  else if (grinder_ > (int8_t)index) --grinder_;
-  settings::saveGrinder(activeSlot_, grinder_);
-  detector_.setGrinder(grinder_);
   Serial.printf("[profil] Störgeräusch %u gelöscht\n", index + 1);
   return persistLocked();
 }
@@ -538,7 +616,9 @@ bool App::cmdDeleteTemplate(uint8_t index) {
 void App::cmdResetTimer() {
   Lock lock(mutex_);
   timer_.reset();
-  if (scale::connected() && scale::config().syncTimer) {
+  // Alles auf 0: auch Gewicht (Tara, beendet die Dosier-Tara) und Timer der Waage
+  if (scale::connected()) {
+    scale::tare();
     scale::timerStop();  // falls er noch läuft
     scale::timerReset();
   }
@@ -554,7 +634,8 @@ void App::cmdApplySettings(DetectorSettings s) {
   Lock lock(mutex_);
   settings_ = s;
   detector_.setSettings(s);
-  persistLocked();
+  settingsDirty_ = true;  // gespeichert wird verzögert in loop()
+  settingsChangedMs_ = millis();
 }
 
 // ---------------------------------------------------------------------------
@@ -562,8 +643,15 @@ void App::cmdApplySettings(DetectorSettings s) {
 // ---------------------------------------------------------------------------
 
 namespace {
-/// Arbeitspuffer für Slot-Operationen (~9 kB, nur unter Mutex benutzt).
-ProfileSlot slotBuf;
+/// Arbeitspuffer für Slot-Operationen (~20 kB, nur unter Mutex benutzt),
+/// einmalig im PSRAM statt im knappen internen RAM.
+ProfileSlot& slotBuf() {
+  static ProfileSlot* buf = [] {
+    void* mem = heap_caps_malloc(sizeof(ProfileSlot), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return new (mem ? mem : malloc(sizeof(ProfileSlot))) ProfileSlot();
+  }();
+  return *buf;
+}
 }  // namespace
 
 void App::summarize(const ProfileSlot& s, bool stored, SlotSummary& out) {
@@ -573,42 +661,44 @@ void App::summarize(const ProfileSlot& s, bool stored, SlotSummary& out) {
   out.recordings = s.pump.recordings;
   out.templates = s.pump.templateCount;
   out.noiseCount = s.noise.count;
+  out.grinderCount = s.grinders.count;
   out.periodHz = s.pump.periodHz();
   out.quality = s.pump.quality;
 }
 
 void App::loadSlotLocked(uint8_t slot) {
   activeSlot_ = slot < cfg::kProfileSlots ? slot : 0;
-  settings::loadSlot(activeSlot_, slotBuf);  // leer -> Standardprofil
-  profile_ = slotBuf.pump;
-  noise_ = slotBuf.noise;
-  settings_ = slotBuf.settings;
-  memcpy(slotName_, slotBuf.name, sizeof(slotName_));
-  grinder_ = settings::loadGrinder(activeSlot_);
-  if (grinder_ >= (int8_t)noise_.count) grinder_ = -1;
+  settingsDirty_ = false;  // ungespeicherte Änderungen des alten Stands verwerfen
+  settings::loadSlot(activeSlot_, slotBuf());  // leer -> Standardprofil
+  profile_ = slotBuf().pump;
+  noise_ = slotBuf().noise;
+  settings_ = slotBuf().settings;
+  grinders_ = slotBuf().grinders;
+  memcpy(slotName_, slotBuf().name, sizeof(slotName_));
   detector_.setProfile(profile_);
   detector_.setNoise(noise_);
-  detector_.setGrinder(grinder_);
   detector_.setSettings(settings_);
   Serial.printf("[profil] Slot %u aktiv: %s%s\n", activeSlot_ + 1, slotName_,
                 profile_.isDefault() ? " (Standardprofil)" : "");
 }
 
 bool App::persistLocked() {
-  memcpy(slotBuf.name, slotName_, sizeof(slotBuf.name));
-  slotBuf.pump = profile_;
-  slotBuf.noise = noise_;
-  slotBuf.settings = settings_;
-  lastSaveOk_ = settings::saveSlot(activeSlot_, slotBuf);
-  summarize(slotBuf, lastSaveOk_, summaries_[activeSlot_]);
+  settingsDirty_ = false;  // speichert auch die Einstellungen mit
+  memcpy(slotBuf().name, slotName_, sizeof(slotBuf().name));
+  slotBuf().pump = profile_;
+  slotBuf().noise = noise_;
+  slotBuf().settings = settings_;
+  slotBuf().grinders = grinders_;
+  lastSaveOk_ = settings::saveSlot(activeSlot_, slotBuf());
+  summarize(slotBuf(), lastSaveOk_, summaries_[activeSlot_]);
   if (!lastSaveOk_) Serial.println("[profil] FEHLER: Speichern fehlgeschlagen");
   return lastSaveOk_;
 }
 
 void App::refreshSummariesLocked() {
   for (uint8_t i = 0; i < cfg::kProfileSlots; ++i) {
-    const bool stored = settings::loadSlot(i, slotBuf);
-    summarize(slotBuf, stored, summaries_[i]);
+    const bool stored = settings::loadSlot(i, slotBuf());
+    summarize(slotBuf(), stored, summaries_[i]);
   }
 }
 
@@ -621,19 +711,11 @@ void App::slots(SlotSummary (&out)[cfg::kProfileSlots], uint8_t& active) {
 void App::cmdSelectSlot(uint8_t slot) {
   if (slot >= cfg::kProfileSlots) return;
   Lock lock(mutex_);
+  if (settingsDirty_) persistLocked();  // offene Änderungen gehören zum bisherigen Slot
   teach_.cancel();
   timer_.reset();
   loadSlotLocked(slot);
   settings::saveActiveSlot(activeSlot_);
-}
-
-void App::cmdNextSlot() {
-  uint8_t next;
-  {
-    Lock lock(mutex_);
-    next = (activeSlot_ + 1) % cfg::kProfileSlots;
-  }
-  cmdSelectSlot(next);
 }
 
 bool App::cmdRenameSlot(uint8_t slot, const String& name) {
@@ -646,10 +728,10 @@ bool App::cmdRenameSlot(uint8_t slot, const String& name) {
     strlcpy(slotName_, n.c_str(), sizeof(slotName_));
     return persistLocked();
   }
-  settings::loadSlot(slot, slotBuf);
-  strlcpy(slotBuf.name, n.c_str(), sizeof(slotBuf.name));
-  const bool ok = settings::saveSlot(slot, slotBuf);
-  summarize(slotBuf, ok, summaries_[slot]);
+  settings::loadSlot(slot, slotBuf());
+  strlcpy(slotBuf().name, n.c_str(), sizeof(slotBuf().name));
+  const bool ok = settings::saveSlot(slot, slotBuf());
+  summarize(slotBuf(), ok, summaries_[slot]);
   return ok;
 }
 
@@ -657,9 +739,8 @@ bool App::cmdDeleteSlot(uint8_t slot) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
   const bool ok = settings::deleteSlot(slot);
-  settings::saveGrinder(slot, -1);
-  settings::defaultSlot(slot, slotBuf);
-  summarize(slotBuf, false, summaries_[slot]);
+  settings::defaultSlot(slot, slotBuf());
+  summarize(slotBuf(), false, summaries_[slot]);
   if (slot == activeSlot_) {
     teach_.cancel();
     loadSlotLocked(slot);
@@ -671,24 +752,24 @@ bool App::exportSlot(uint8_t slot, String& out, String& name) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
   if (slot == activeSlot_) {
-    memcpy(slotBuf.name, slotName_, sizeof(slotBuf.name));
-    slotBuf.pump = profile_;
-    slotBuf.noise = noise_;
-    slotBuf.settings = settings_;
+    memcpy(slotBuf().name, slotName_, sizeof(slotBuf().name));
+    slotBuf().pump = profile_;
+    slotBuf().noise = noise_;
+    slotBuf().settings = settings_;
+    slotBuf().grinders = grinders_;
   } else {
-    settings::loadSlot(slot, slotBuf);
+    settings::loadSlot(slot, slotBuf());
   }
-  name = slotBuf.name;
-  return settings::encodeSlot(slotBuf, out);
+  name = slotBuf().name;
+  return settings::encodeSlot(slotBuf(), out);
 }
 
 bool App::cmdImportSlot(uint8_t slot, const String& data) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
-  if (!settings::decodeSlot(data, slotBuf)) return false;
-  const bool ok = settings::saveSlot(slot, slotBuf);
-  if (ok) settings::saveGrinder(slot, -1);  // Markierung "Mühle" gehört nicht zum Export
-  summarize(slotBuf, ok, summaries_[slot]);
+  if (!settings::decodeSlot(data, slotBuf())) return false;
+  const bool ok = settings::saveSlot(slot, slotBuf());
+  summarize(slotBuf(), ok, summaries_[slot]);
   if (ok && slot == activeSlot_) {
     teach_.cancel();
     loadSlotLocked(slot);

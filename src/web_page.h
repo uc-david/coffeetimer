@@ -83,6 +83,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     <div id="weightLine" class="hidden" style="text-align:center;font-size:28px;font-weight:700;font-variant-numeric:tabular-nums">
       <span id="weight">–</span> <small id="flow" style="font-size:16px;color:var(--muted)"></small>
       <button style="min-width:0;padding:4px 10px;margin-left:8px;font-size:13px" onclick="post('/api/scale/tare')">Tara</button>
+      <button style="min-width:0;padding:4px 10px;font-size:13px" onclick="post('/api/scale/timer-reset')">Zeit 0</button>
     </div>
     <div id="hint" class="hint"></div>
     <div id="profileLine" class="hint" style="margin-top:4px"></div>
@@ -107,11 +108,16 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       <div class="bar" id="rhyBar"><i></i><b></b></div>
     </div>
     <div class="row" style="margin-top:14px">
-      <button onclick="post('/api/timer/reset')">Reset</button>
-      <button class="primary" id="teachBtn" onclick="startTeach('pump')">Pumpe einlernen</button>
-      <button id="noiseBtn" onclick="startTeach('noise')">Störgeräusch einlernen</button>
+      <button onclick="post('/api/timer/reset')" title="Timer, Gewicht und Timer der Waage auf 0">Reset</button>
     </div>
-    <small style="color:var(--muted)">Störgeräusch: z. B. die Mühle laufen lassen – wird danach ignoriert und kann als Mühle markiert werden.</small>
+    <div class="row" style="margin-top:8px">
+      <span style="color:var(--muted);align-self:center">Einlernen:</span>
+      <button class="teachStart primary" data-mode="pump" onclick="startTeach('pump')">Pumpe</button>
+      <button class="teachStart" data-mode="grinder" onclick="startTeach('grinder')">Mühle</button>
+      <button class="teachStart" data-mode="noise" onclick="startTeach('noise')">Störgeräusch</button>
+    </div>
+    <small style="color:var(--muted)" id="teachTip">Jede Aufnahme misst zuerst 3 s Ruhe und ist unabhängig von den anderen –
+      die Reihenfolge ist egal. Mühle: neue Mühle oder einer vorhandenen hinzufügen. Störgeräusch: z. B. Milchaufschäumer.</small>
     <div id="offline" class="offline hidden">Keine Verbindung zum Gerät …</div>
   </section>
 
@@ -177,9 +183,37 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     <small style="color:var(--muted)">Unterstützt: Felicita (Arc, Incline, Parallel), Acaia (Lunar, Pearl, Pyxis, Cinco …),
       Bookoo Themis, Decent Scale. Waage einschalten – sie wird automatisch gefunden. Das Endgewicht (inkl. Nachtropfen)
       wird in der Historie gespeichert.<br>
-      Mühlen-Tara: Mühle als Störgeräusch einlernen und unter „Erkennung“ als Mühle markieren. Läuft die Mühle, wird die
+      Mühlen-Tara: jede Mühle einmal über „Einlernen → Mühle“ lernen (bis zu 3 Mühlen). Läuft eine davon, wird die
       leere Waage tariert und zeigt −Siebträgergewicht; mit dem gefüllten Siebträger darauf steht dort das Kaffeemehl.
       Die Dosis landet beim nächsten Bezug in der Historie.</small>
+  </section>
+
+  <!-- Vibration ---------------------------------------------------------- -->
+  <section class="card" id="vibCard">
+    <h2>Erkennung über Vibration</h2>
+    <div class="kv" id="vibInfo"></div>
+    <div class="meter">
+      <label><span>Vibration über Ruhepegel</span><span id="vibTxt"></span></label>
+      <div class="bar" id="vibBar"><i></i><b></b></div>
+    </div>
+    <div class="field">
+      <label>Pumpe erkennen über</label>
+      <select id="vibMode" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px;width:100%">
+        <option value="0">Mikrofon (Geräusch)</option>
+        <option value="1">Vibration (CoreS3 steht auf der Maschine)</option>
+        <option value="2">Mikrofon + Vibration (beides muss passen)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Vibrations-Schwelle <b id="v_vib"></b></label>
+      <input type="range" id="vibTh" min="2" max="30" step="1">
+      <small>So viel muss die Vibration über dem automatisch gemessenen Ruhepegel liegen. Pumpe laufen lassen und
+        den Balken beobachten: Schwelle etwa in die Mitte zwischen Ruhe und laufender Pumpe legen.</small>
+    </div>
+    <div class="row"><button class="primary" onclick="saveVib()">Übernehmen</button></div>
+    <small style="color:var(--muted)">Der CoreS3 misst mit seinem Beschleunigungssensor das Zittern der Maschine. Dazu muss er
+      fest auf der Maschine stehen (z. B. Tassenablage). Unabhängig von Raumgeräuschen und der Mühle; „Mikrofon + Vibration“
+      ist am zuverlässigsten. Hinweis: Auch eine Nachfüllpumpe (Zweikreiser) vibriert.</small>
   </section>
 
   <!-- Mikrofon ------------------------------------------------------------ -->
@@ -284,9 +318,12 @@ let settingsLoaded = false;
 let profileValid = false;
 let teachMode = 'pump';
 let profileDefault = true;
+let grinderNames = [];  // gelernte Mühlen
+let maxGrinders = 3;    // vom Gerät (profile.maxGrinders)
 let lastSlot = -1;
 let micLoaded = false;
 let scaleLoaded = false;
+let vibLoaded = false;
 let lastOk = Date.now();
 
 // --- Hilfsfunktionen -------------------------------------------------------
@@ -321,13 +358,15 @@ function setBar(id, value, threshold, active) {
 function render(s) {
   profileValid = s.profile.valid;
   profileDefault = s.profile.isDefault;
+  grinderNames = s.profile.grinders || [];
+  maxGrinders = s.profile.maxGrinders || maxGrinders;
   // Status-Pille
   const st = $('status');
   let txt = 'Bereit', on = false;
   if (s.teach.phase !== 'idle') txt = 'Teach';
   else if (!s.profile.valid) txt = 'Kein Profil';
   else if (s.pumpOn) { txt = 'Pumpe läuft'; on = true; }
-  else if (s.live.grinderOn) txt = 'Mühle läuft';
+  else if (s.live.grinderOn) txt = (s.live.grinderName || 'Mühle') + ' läuft';
   else if (s.live.rejected) txt = 'Störgeräusch – ignoriert';
   st.textContent = txt; st.classList.toggle('on', on);
 
@@ -364,6 +403,19 @@ function render(s) {
     scaleLoaded = true;
   }
 
+  // Vibration
+  const v = s.vibration;
+  $('vibCard').classList.toggle('hidden', !v.available);
+  if (v.available) {
+    const over = v.levelDb - v.baselineDb;
+    setBar('vibBar', over / (2 * v.thresholdDb), 0.5, v.active);
+    $('vibTxt').textContent = (over >= 0 ? '+' : '') + over.toFixed(1) + ' dB';
+    $('vibInfo').innerHTML = `<span>Status: <b>${v.mode === 0 ? 'nicht verwendet' : v.active ? 'Vibration erkannt' : 'Ruhe'}</b></span>` +
+      `<span>Pegel: <b>${v.levelDb.toFixed(1)} dB</b></span><span>Ruhepegel: <b>${v.baselineDb.toFixed(1)} dB</b></span>` +
+      `<span>Schwankung: <b>${v.steadiness >= 20 ? '–' : '±' + v.steadiness.toFixed(1) + ' dB'}</b></span>`;
+    if (!vibLoaded) { $('vibMode').value = v.mode; $('vibTh').value = v.thresholdDb; updateVibLabel(); vibLoaded = true; }
+  }
+
   // Mikrofon
   if (!micLoaded) { $('micGain').value = s.mic.gain; updateGainLabel(); micLoaded = true; }
   $('clipWarn').textContent = s.mic.clip > 0.001
@@ -386,8 +438,12 @@ function render(s) {
   $('stdTxt').textContent = lv.steadiness >= 20 ? '–' : '±' + lv.steadiness.toFixed(1) + ' dB';
   setBar('rhyBar', Math.max(0, lv.rhythm), s.profile.rhythmThreshold, lv.rhythm >= s.profile.rhythmThreshold);
   $('rhyTxt').textContent = Math.round(lv.rhythm * 100) + ' %';
-  $('teachBtn').disabled = s.teach.phase !== 'idle';
-  $('noiseBtn').disabled = s.teach.phase !== 'idle' || !s.profile.valid;
+  document.querySelectorAll('.teachStart').forEach(b => {
+    const m = b.dataset.mode;
+    b.disabled = s.teach.phase !== 'idle';
+  });
+  document.querySelector('.teachStart[data-mode="grinder"]').textContent =
+    grinderNames.length ? `Mühle (${grinderNames.length})` : 'Mühle';
 
   renderTeach(s.teach);
   renderHistory(s.history);
@@ -418,8 +474,8 @@ function renderTeach(t) {
   card.classList.toggle('hidden', t.phase === 'idle');
   if (t.phase === 'idle') return;
   teachMode = t.mode;
-  const noise = t.mode === 'noise';
-  $('teachTitle').textContent = noise ? 'Teach-Modus: Störgeräusch' : 'Teach-Modus: Pumpe';
+  const noise = t.mode === 'noise' || t.mode === 'grinder';
+  $('teachTitle').textContent = 'Teach-Modus: ' + { pump: 'Pumpe', noise: 'Störgeräusch', grinder: 'Mühle' }[t.mode];
 
   $('teachInstr').textContent = t.instruction +
     (t.phase === 'recordPump' ? `  (${(t.recordedMs / 1000).toFixed(1)} s)` : '');
@@ -468,11 +524,20 @@ function renderTeach(t) {
   }
   const usable = done && t.result && t.result.quality !== 'error';
   $('finishBtn').classList.toggle('hidden', t.phase !== 'recordPump');
-  $('saveBtn').classList.toggle('hidden', !usable);
-  $('saveBtn').textContent = noise ? 'Störgeräusch speichern' : (profileValid ? 'Profil ersetzen' : 'Profil speichern');
-  $('addBtn').classList.toggle('hidden', !(usable && profileValid && !profileDefault && !noise));
-  $('teachHint').textContent = usable && profileValid && !profileDefault && !noise
-    ? 'Ergänzen: z. B. erst Leerbezug, dann echten Bezug einlernen – beide werden erkannt.' : '';
+  const grinderMode = t.mode === 'grinder';
+  const grindersFull = grinderNames.length >= maxGrinders;
+  $('saveBtn').classList.toggle('hidden', !usable || (grinderMode && grindersFull));
+  $('saveBtn').textContent = grinderMode ? (grinderNames.length ? 'Als neue Mühle speichern' : 'Mühle speichern')
+    : noise ? 'Störgeräusch speichern' : (profileValid ? 'Profil ersetzen' : 'Profil speichern');
+  const pumpAdd = usable && profileValid && !profileDefault && t.mode === 'pump';
+  const match = t.result && t.result.grinderMatch >= 0 ? grinderNames[t.result.grinderMatch] : null;
+  const grinderAdd = usable && grinderMode && !!match;
+  $('addBtn').classList.toggle('hidden', !(pumpAdd || grinderAdd));
+  $('addBtn').textContent = grinderMode ? `Zu „${match}“ hinzufügen` : 'Profil ergänzen';
+  $('teachHint').textContent = pumpAdd
+    ? 'Ergänzen: z. B. erst Leerbezug, dann echten Bezug einlernen – beide werden erkannt.'
+    : grinderAdd ? 'Dieselbe Mühle (z. B. anderer Mahlgrad, leer gelaufen)? Dann hinzufügen – sonst als neue Mühle speichern.'
+    : '';
   $('retryBtn').classList.toggle('hidden', !done);
   $('cancelBtn').textContent = done ? 'Verwerfen' : 'Abbrechen';
 }
@@ -513,7 +578,7 @@ function startTeach(mode) { post('/api/teach/start', { mode }); }
 /** Liste der Klangmuster und Störgeräusche mit Löschknöpfen (nur bei Änderung neu aufbauen). */
 let partsKey = '';
 function renderParts(p) {
-  const key = `${p.slot}/${p.templates}/${p.noiseCount}/${p.isDefault}/${p.grinder}`;
+  const key = `${p.slot}/${p.templates}/${p.noiseCount}/${p.isDefault}/${(p.grinders || []).join('|')}`;
   if (key === partsKey) return;
   partsKey = key;
   const btn = (fn, i, enabled) =>
@@ -523,18 +588,24 @@ function renderParts(p) {
     for (let i = 0; i < p.templates; ++i)
       rows += `<tr><td>Klangmuster ${i + 1}</td><td>${btn('deleteTemplate', i, p.templates > 1)}</td></tr>`;
   }
-  for (let i = 0; i < p.noiseCount; ++i) {
-    const isGrinder = p.grinder === i;
-    const mark = `<button style="min-width:0;padding:4px 10px" ${isGrinder ? 'class="primary"' : ''} ` +
-      `title="Als Mühle markieren (Mühlen-Tara)" onclick="setGrinder(${isGrinder ? -1 : i})">${isGrinder ? '✓ Mühle' : 'Mühle?'}</button>`;
-    rows += `<tr><td>Störgeräusch ${i + 1}${isGrinder ? ' (Mühle)' : ''}</td><td style="white-space:nowrap">${mark} ${btn('deleteNoise', i, true)}</td></tr>`;
-  }
+  (p.grinders || []).forEach((name, i) => {
+    const ren = `<button style="min-width:0;padding:4px 10px" title="Umbenennen" onclick="renameGrinder(${i})">✎</button>`;
+    rows += `<tr><td>☕ ${esc(name)}</td><td style="white-space:nowrap">${ren} ${btn('deleteGrinder', i, true)}</td></tr>`;
+  });
+  for (let i = 0; i < p.noiseCount; ++i)
+    rows += `<tr><td>Störgeräusch ${i + 1}</td><td>${btn('deleteNoise', i, true)}</td></tr>`;
   $('partsList').innerHTML = rows;
 }
 function deleteTemplate(i) {
   if (confirm(`Klangmuster ${i + 1} löschen?`)) post('/api/templates/delete', { index: i }).then(loadProfiles);
 }
-function setGrinder(i) { post('/api/grinder', { index: i }); }
+function deleteGrinder(i) {
+  if (confirm(`„${grinderNames[i]}“ löschen?`)) post('/api/grinders/delete', { index: i });
+}
+function renameGrinder(i) {
+  const name = prompt('Name der Mühle:', grinderNames[i]);
+  if (name && name.trim()) post('/api/grinders/rename', { index: i, name: name.trim() });
+}
 function deleteNoise(i) {
   if (confirm(`Störgeräusch ${i + 1} löschen?`)) post('/api/noise/delete', { index: i }).then(loadProfiles);
 }
@@ -549,7 +620,8 @@ async function loadProfiles() {
       const info = s.isDefault ? 'Standardprofil'
         : `${s.recordings} Teach-Aufnahme(n) · ${s.templates} Klangmuster · ` +
           `${s.periodHz > 0 ? 'Takt ' + s.periodHz.toFixed(0) + ' Hz' : 'ohne Takt'} · Qualität ${s.quality.toFixed(0)}/100` +
-          `${s.noise ? ' · ' + s.noise + ' Störgeräusch(e)' : ''}`;
+          `${s.noise ? ' · ' + s.noise + ' Störgeräusch(e)' : ''}` +
+          `${s.grinders ? ' · ' + s.grinders + ' Mühle(n)' : ''}`;
       const active = i === p.active;
       return `<tr><td>${active ? '▶ ' : ''}<b>${i + 1}. ${esc(s.name)}</b><br><small style="color:var(--muted)">${info}</small></td>` +
         `<td style="white-space:nowrap">` +
@@ -599,6 +671,11 @@ function saveScale() {
 }
 function learnPortafilter() {
   post('/api/scale/portafilter').then(j => { if (j && j.ok) scaleLoaded = false; });
+}
+function updateVibLabel() { $('v_vib').textContent = '+' + $('vibTh').value + ' dB'; }
+$('vibTh').addEventListener('input', updateVibLabel);
+function saveVib() {
+  post('/api/vibration', { mode: parseInt($('vibMode').value), thresholdDb: parseFloat($('vibTh').value) });
 }
 function saveMic() { post('/api/mic', { gain: parseInt($('micGain').value) }); }
 

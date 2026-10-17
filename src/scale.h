@@ -47,7 +47,6 @@ Config config();
 /// Übernimmt und speichert neue Einstellungen.
 void setConfig(const Config& c);
 
-State state();
 const char* stateText();   ///< Klartext für Anzeige
 bool connected();
 
@@ -73,6 +72,9 @@ void tareForDose();
 void clearDoseOffset();
 /// true, solange die Dosier-Tara aktiv ist.
 bool doseMode();
+/// Zählt jede angeforderte Tara (tare/tareForDose) – zum Erkennen, dass das
+/// Gewicht seit einem Zeitpunkt auf 0 gesetzt wurde.
+uint32_t tareCount();
 /// Übernimmt das aktuelle Gewicht als Siebträgergewicht. false = keine plausiblen Daten.
 bool learnPortafilter();
 

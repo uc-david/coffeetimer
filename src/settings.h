@@ -14,6 +14,8 @@
 
 #include <Arduino.h>
 
+#include <new>
+
 #include "config.h"
 
 /**
@@ -60,17 +62,38 @@ struct PumpProfile {
 };
 
 /**
- * Gelernte Störgeräusche (z. B. Kaffeemühle). Klingt ein Geräusch einem
+ * Gelernte Störgeräusche (z. B. Milchaufschäumer). Klingt ein Geräusch einem
  * Störgeräusch ähnlicher als der Pumpe, wird es ignoriert.
+ *
+ * Jeder Eintrag ist eigenständig: Er bringt seinen eigenen Hintergrund, Pegel,
+ * Schwelle und die Mikrofon-Verstärkung seiner Aufnahme mit. Ein späterer
+ * Pumpen-Teach (anderer Hintergrund, andere Verstärkung) ändert daran nichts.
  */
 struct NoiseProfile {
   struct Entry {
     uint8_t templateCount = 0;
     float templates[cfg::kNoiseTemplates][cfg::kNumBands] = {};  ///< wie PumpProfile
     float rhythm[cfg::kAcfLen] = {};                             ///< wie PumpProfile
+    float bgBandDb[cfg::kNumBands] = {};  ///< Hintergrundspektrum bei der Aufnahme
+    float bgRmsDb = -90.0f;               ///< Hintergrundpegel bei der Aufnahme
+    float levelDb = -90.0f;               ///< typischer (leiser) Pegel des Geräuschs
+    float simThreshold = 0.75f;           ///< eigene Mindest-Ähnlichkeit (aus der Aufnahme)
+    float micGain = cfg::kMicGainDefault; ///< Mikrofon-Verstärkung bei der Aufnahme
   };
   uint8_t count = 0;
   Entry entries[cfg::kMaxNoises];
+};
+
+/**
+ * Gelernte Mühlen – getrennt von den Störgeräuschen. Werden wie diese bei der
+ * Pumpenerkennung ignoriert und lösen zusätzlich die Mühlen-Tara aus.
+ * Jede Mühle kann mehrere Aufnahmen enthalten (leer / mit Bohnen, Mahlgrad).
+ */
+struct GrinderProfile {
+  static constexpr size_t kNameLen = 16;
+  uint8_t count = 0;
+  NoiseProfile::Entry entries[cfg::kMaxGrinders];
+  char names[cfg::kMaxGrinders][kNameLen] = {};  ///< frei wählbar (UTF-8)
 };
 
 /// Vom Benutzer einstellbare Erkennungsparameter. Klangmuster- und
@@ -99,6 +122,7 @@ struct ProfileSlot {
   PumpProfile pump;
   NoiseProfile noise;
   DetectorSettings settings;
+  GrinderProfile grinders;      ///< muss das letzte Feld bleiben (Migration v6 in settings.cpp)
 };
 
 /// WLAN-Zugangsdaten.
@@ -106,6 +130,14 @@ struct WifiSettings {
   String ssid;
   String password;
 };
+
+/// Setzt ein (großes) Objekt auf seine Standardwerte zurück, ohne ein
+/// Temporärobjekt auf dem Stack anzulegen (ProfileSlot ist ~20 kB groß).
+template <typename T>
+void resetInPlace(T& v) {
+  v.~T();
+  new (&v) T();
+}
 
 /// Laden / Speichern aller persistenten Daten.
 namespace settings {
@@ -134,11 +166,6 @@ bool decodeSlot(const String& in, ProfileSlot& out);
 
 uint8_t loadActiveSlot();
 void saveActiveSlot(uint8_t slot);
-
-/// Welches Störgeräusch eines Slots die Mühle ist (-1 = keines). Liegt im NVS,
-/// damit das Slot-Dateiformat (und Exporte) unverändert bleiben.
-int8_t loadGrinder(uint8_t slot);
-void saveGrinder(uint8_t slot, int8_t index);
 
 uint8_t loadMicGain();
 void saveMicGain(uint8_t gain);

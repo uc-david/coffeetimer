@@ -259,6 +259,10 @@ constexpr float kMinPortafilterG = 50.0f;   ///< leichter = kein Siebträger
 /// Gewicht bewegt. Nach dieser Zeit wird geprüft und ggf. erneut tariert.
 constexpr uint32_t kTareCheckMs = 800;
 constexpr uint8_t kTareRetries = 5;
+/// Ändert sich das Gewicht seit der Tara um mehr als das, wurde etwas
+/// abgestellt/abgenommen (Tara angekommen). Ein laufender Bezug legt in
+/// kTareCheckMs nur wenige Gramm zu.
+constexpr float kTareChangedG = 5.0f;
 
 // --- Zustand (von mehreren Tasks genutzt) -------------------------------------
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
@@ -266,6 +270,7 @@ scale::Config cfg;
 std::atomic<scale::State> state{scale::State::Off};
 std::atomic<uint8_t> pendingCmds{0};  ///< Bitmaske vorgemerkter Befehle
 std::atomic<const Protocol*> proto{nullptr};  ///< Protokoll der verbundenen Waage
+std::atomic<uint32_t> tares{0};               ///< Anzahl angeforderter Tara-Befehle
 
 float lastWeight = NAN;   ///< Rohgewicht der Waage
 float doseOffset = 0.0f;  ///< Dosier-Tara: wird zum Rohgewicht addiert
@@ -352,15 +357,18 @@ void armTareCheck(uint32_t now) {
 }
 
 /**
- * Hat die Waage die Tara übernommen? Erfolg = Gewicht nahe 0 bzw. deutlich
- * gefallen (während eines Bezugs läuft schon wieder etwas nach). Sonst erneut senden.
+ * Hat die Waage die Tara übernommen? Erneut gesendet wird nur, wenn sie den
+ * Befehl offensichtlich ignoriert hat: Gewicht weder nahe 0 noch deutlich
+ * verändert. Wurde inzwischen z. B. eine Tasse abgestellt, bleibt sie stehen.
  */
 void checkTare(const Protocol* p, uint32_t now) {
   if (!tareCheckAtMs || static_cast<int32_t>(now - tareCheckAtMs) < 0) return;
   portENTER_CRITICAL(&mux);
   const float w = freshLocked() ? lastWeight : NAN;
   portEXIT_CRITICAL(&mux);
-  const bool done = isnan(w) || fabsf(w) < fmaxf(3.0f, fabsf(weightAtTare) * 0.5f);
+  const bool zeroed = isnan(w) || fabsf(w) < fmaxf(3.0f, fabsf(weightAtTare) * 0.5f);
+  const bool changed = !isnan(w) && fabsf(w - weightAtTare) > kTareChangedG;
+  const bool done = zeroed || changed;
   if (done || tareTries >= kTareRetries) {
     if (!done) Serial.println("[scale] Tara nicht übernommen – aufgegeben");
     tareCheckAtMs = 0;
@@ -530,7 +538,6 @@ void scaleTask(void*) {
   }
 }
 
-
 }  // namespace
 
 namespace scale {
@@ -558,8 +565,6 @@ void setConfig(const Config& c) {
   prefs.putBool("grindTare", cfg.grindTare);
   prefs.putFloat("pfG", cfg.portafilterG);
 }
-
-State state() { return ::state.load(); }
 
 const char* stateText() {
   switch (::state.load()) {
@@ -641,6 +646,7 @@ const char* model() {
 
 void tare() {
   clearDoseOffset();
+  ++tares;
   pendingCmds |= kBitTare;
 }
 
@@ -649,6 +655,7 @@ void tareForDose() {
   doseOffset = -cfg.portafilterG;
   doseActive = true;
   portEXIT_CRITICAL(&mux);
+  ++tares;
   pendingCmds |= kBitTare;
 }
 
@@ -665,6 +672,8 @@ bool doseMode() {
   portEXIT_CRITICAL(&mux);
   return d;
 }
+
+uint32_t tareCount() { return tares.load(); }
 
 bool learnPortafilter() {
   if (!stable()) return false;

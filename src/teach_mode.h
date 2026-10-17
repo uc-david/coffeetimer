@@ -1,6 +1,15 @@
 /**
  * @file teach_mode.h
- * @brief Teach-Modus: Lernen des Pumpengeräuschs bzw. von Störgeräuschen.
+ * @brief Teach-Modus: Lernen von Ruhe, Pumpe, Mühle und Störgeräuschen.
+ *
+ * Die Modi sind einzeln wählbar und völlig unabhängig voneinander: Jede
+ * Aufnahme beginnt mit ihrer eigenen Ruhe (3 s) und speichert eigenen
+ * Hintergrund, Pegel, Schwelle und Mikrofon-Verstärkung. Die Reihenfolge des
+ * Einlernens spielt keine Rolle.
+ *  - Pumpe:        siehe unten
+ *  - Mühle:        wie Störgeräusch; wird als neue Mühle gespeichert oder
+ *                  einer vorhandenen Mühle hinzugefügt (eigene Liste)
+ *  - Störgeräusch: z. B. Milchaufschäumer – wird ignoriert
  *
  * Modus "Pumpe":
  *   1. Background  – Pumpe AUS, Hintergrundgeräusch wird aufgenommen (3 s)
@@ -16,8 +25,9 @@
  *                      welcher Anteil der Aufnahme damit erkannt würde
  *                    Ergebnis kann das Profil ersetzen oder ergänzen.
  *
- * Modus "Störgeräusch" (z. B. Kaffeemühle; benötigt ein Pumpenprofil):
- *   2. WaitPump    – Benutzer schaltet das Störgeräusch ein
+ * Modus "Störgeräusch" / "Mühle":
+ *   1. Background  – eigener Hintergrund (3 s)
+ *   2. WaitPump    – Benutzer schaltet das Geräusch ein
  *   3. RecordPump  – Aufnahme, bis es 1,5 s still ist (max. 30 s)
  *   4. Done        – Klangmuster + Rhythmus des Störgeräuschs; Anzeige, wie oft
  *                    es bisher als Pumpe erkannt wurde und wie oft danach.
@@ -29,7 +39,10 @@
 
 enum class TeachPhase { Idle, Background, WaitPump, RecordPump, Done };
 
-enum class TeachMode { Pump, Noise };
+enum class TeachMode { Pump, Noise, Grinder };
+
+/// Mühle und Störgeräusch werden gleich aufgenommen und ausgewertet.
+inline bool isNoiseMode(TeachMode m) { return m == TeachMode::Noise || m == TeachMode::Grinder; }
 
 enum class TeachQuality { Ok, Warning, Error };
 
@@ -64,7 +77,9 @@ struct TeachResult {
   // Störgeräusch-Modus
   float noiseHitBefore = 0.0f;   ///< Anteil, der bisher als Pumpe erkannt wurde
   float noiseHitAfter = 0.0f;    ///< Anteil mit gespeichertem Störgeräusch
-  NoiseProfile::Entry noise;     ///< gelerntes Störgeräusch
+  NoiseProfile::Entry noise;     ///< gelerntes Störgeräusch / gelernte Mühle
+  int8_t grinderMatch = -1;      ///< Mühle: ähnlichste vorhandene Mühle (-1 = keine)
+  float grinderMatchSim = 0.0f;  ///< deren Klangmuster-Ähnlichkeit 0..1
 
   // Aus der Aufnahme berechnete Einstellungen (werden beim Speichern übernommen)
   float suggestedSimilarity = 0.75f;
@@ -90,9 +105,12 @@ class TeachController {
    * @param current  aktuelle Einstellungen
    * @param profile  aktuelles Pumpenprofil (Störgeräusch-Modus: Bezugsgröße)
    * @param noise    bereits gelernte Störgeräusche (für die Bewertung)
+   * @param grinders bereits gelernte Mühlen (Zeiger bleibt gültig, für die Bewertung)
+   * @param gain     aktuelle Mikrofon-Verstärkung (wird mit der Aufnahme gespeichert)
    */
   void start(uint32_t nowMs, TeachMode mode, const DetectorSettings& current,
-             const PumpProfile& profile, const NoiseProfile& noise);
+             const PumpProfile& profile, const NoiseProfile& noise,
+             const GrinderProfile* grinders, float gain);
 
   /// Bricht ab und kehrt in den Ruhezustand zurück.
   void cancel();
@@ -129,6 +147,12 @@ class TeachController {
 
   /// Kurzer Name der Phase (für die Webseite / JSON).
   static const char* phaseName(TeachPhase p);
+  /// Kurzer Name des Modus (JSON: "pump", "noise", "grinder", "background").
+  static const char* modeName(TeachMode m);
+  /// Modus aus dem JSON-Namen (unbekannt -> Pumpe).
+  static TeachMode modeFromName(const char* name);
+
+
 
   const TeachResult& result() const { return result_; }
 
@@ -160,11 +184,13 @@ class TeachController {
   size_t lastLoudIndex_ = 0;     ///< dessen Index in pumpFrames_ (+1)
   uint32_t recordedMs_ = 0;
   volatile bool finishRequested_ = false;
+  float gain_ = cfg::kMicGainDefault;  ///< Mikrofon-Verstärkung der laufenden Aufnahme
 
   // Zustand beim Start (Kopien, da sich die Originale ändern können)
   DetectorSettings settings_;
   PumpProfile currentProfile_;
   NoiseProfile currentNoise_;
+  const GrinderProfile* grinders_ = nullptr;
 
   // Aufnahmepuffer (PSRAM)
   AudioFrame* bgFrames_ = nullptr;

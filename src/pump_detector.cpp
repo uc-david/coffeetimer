@@ -15,15 +15,17 @@ constexpr float kHystSimilarity = 0.90f;
 constexpr float kHystPeriodicity = 0.85f;
 constexpr float kHystRhythm = 0.85f;
 constexpr float kHystLevel = 0.70f;
-constexpr float kHystSteady = 1.30f;
+constexpr float kHystSteady = 1.30f;  // Pegelschwankung darf bei laufender Pumpe etwas größer sein
 
 /// Maximale Rückdatierung des Timer-Starts auf den Beginn der lauten Phase.
-constexpr uint32_t kMaxBackdateMs = 1500;  // Pegelschwankung darf bei laufender Pumpe etwas größer sein
+constexpr uint32_t kMaxBackdateMs = 1500;
 // Mühle: so lange hörbar, bis sie als laufend gilt / Aussetzer, die toleriert
 // werden / Stille, nach der sie als aus gilt.
 constexpr uint32_t kGrinderOnMs = 1000;
 constexpr uint32_t kGrinderGapMs = 300;
 constexpr uint32_t kGrinderOffMs = 1500;
+/// Mindestpegel der Mühle: Mitte zwischen ihrem Hintergrund und ihrem Mahlpegel.
+constexpr float kGrinderLevel = 0.5f;
 
 /// Skalarprodukt zweier Bandvektoren.
 float dotBands(const float* a, const float* b) {
@@ -99,12 +101,6 @@ float PumpDetector::bestTemplate(const float* excess, const float (*templates)[c
   return best;
 }
 
-float PumpDetector::similarity(const float* bandDb, const PumpProfile& p) {
-  float x[cfg::kNumBands];
-  if (excessVector(bandDb, p.bgBandDb, x) == 0.0f) return 0.0f;
-  return bestTemplate(x, p.templates, p.templateCount);
-}
-
 float PumpDetector::levelRatio(float rmsDb, const PumpProfile& p) {
   const float span = fmaxf(p.pumpRmsDb - p.bgRmsDb, 1.0f);
   return (rmsDb - p.bgRmsDb) / span;
@@ -155,44 +151,77 @@ bool PumpDetector::isLoud(float rmsDb, const PumpProfile& p, const DetectorSetti
   return levelRatio(rmsDb, p) >= st.levelThreshold * (hysteresis ? kHystLevel : 1.0f);
 }
 
+float PumpDetector::gainOffsetDb(float learnedGain, float currentGain) {
+  return learnedGain > 0.0f && currentGain > 0.0f ? 20.0f * log10f(learnedGain / currentGain) : 0.0f;
+}
+
 FrameScores PumpDetector::score(const float* bandDb, float rmsDb, const float* curve,
                                 float steadiness, const PumpProfile& p, const NoiseProfile& n,
-                                int grinder) {
+                                const GrinderProfile* g, float gain) {
   FrameScores s;
   s.steadiness = steadiness;
+  // Jedes Geräusch wird mit seiner eigenen Verstärkung und seinem eigenen
+  // Hintergrund verglichen (keine Abhängigkeit zwischen den Geräuschen).
+  float shifted[cfg::kNumBands];
+  auto excessFor = [&](float learnedGain, const float* bg, float* out) {
+    const float off = gainOffsetDb(learnedGain, gain);
+    for (size_t b = 0; b < cfg::kNumBands; ++b) shifted[b] = bandDb[b] + off;
+    return excessVector(shifted, bg, out) > 0.0f;
+  };
   float x[cfg::kNumBands];
-  const bool audible = excessVector(bandDb, p.bgBandDb, x) > 0.0f;
+  const bool audible = excessFor(p.micGain, p.bgBandDb, x);
 
   s.similarity = audible ? bestTemplate(x, p.templates, p.templateCount) : 0.0f;
-  s.levelRatio = levelRatio(rmsDb, p);
+  s.levelRatio = levelRatio(rmsDb + gainOffsetDb(p.micGain, gain), p);
   if (p.periodic) {
     s.periodicity = periodicityAt(curve, p.periodLag);
     s.rhythm = rhythmSimilarity(curve, p.rhythm);
   }
 
-  // Ähnlichstes Störgeräusch (nach demselben Gesamtwert wie die Pumpe).
+  // Ähnlichstes Störgeräusch bzw. ähnlichste Mühle (nach demselben
+  // Gesamtwert wie die Pumpe).
+  auto compare = [&](const NoiseProfile::Entry& e, float& sim, float& rhy) {
+    float xe[cfg::kNumBands];
+    sim = excessFor(e.micGain, e.bgBandDb, xe) ? bestTemplate(xe, e.templates, e.templateCount) : 0.0f;
+    rhy = rhythmSimilarity(curve, e.rhythm);
+    return combined(p.periodic, sim, rhy);
+  };
   float bestNoise = -2.0f;
   for (size_t i = 0; i < n.count; ++i) {
-    const NoiseProfile::Entry& e = n.entries[i];
-    const float ns = audible ? bestTemplate(x, e.templates, e.templateCount) : 0.0f;
-    const float nr = rhythmSimilarity(curve, e.rhythm);
-    const float c = combined(p.periodic, ns, nr);
-    if ((int)i == grinder) {
-      s.grinderSimilarity = ns;
-      s.grinderRhythm = nr;
-    }
+    float ns, nr;
+    const float c = compare(n.entries[i], ns, nr);
     if (c > bestNoise) {
       bestNoise = c;
-      s.noiseIndex = static_cast<int8_t>(i);
       s.noiseSimilarity = ns;
       s.noiseRhythm = nr;
     }
   }
+  float bestGrinder = -2.0f;
+  for (size_t i = 0; g && i < g->count; ++i) {
+    float gs, gr;
+    const float c = compare(g->entries[i], gs, gr);
+    if (c > bestGrinder) {
+      const NoiseProfile::Entry& e = g->entries[i];
+      bestGrinder = c;
+      s.grinderIndex = static_cast<int8_t>(i);
+      s.grinderSimilarity = gs;
+      s.grinderRhythm = gr;
+      // Pegel relativ zum eigenen Hintergrund (0) .. eigenen Mahlpegel (1)
+      s.grinderLevelRatio = (rmsDb + gainOffsetDb(e.micGain, gain) - e.bgRmsDb) /
+                            fmaxf(e.levelDb - e.bgRmsDb, 3.0f);
+    }
+  }
+  s.hasNoise = n.count > 0 || s.grinderIndex >= 0;
+  s.bestIsGrinder = s.grinderIndex >= 0 && bestGrinder >= bestNoise;
+  if (s.bestIsGrinder) {  // für die Ablehnung zählt das Ähnlichste von beiden
+    s.noiseSimilarity = s.grinderSimilarity;
+    s.noiseRhythm = s.grinderRhythm;
+  }
   return s;
 }
 
-bool PumpDetector::matches(const FrameScores& s, const PumpProfile& p, const NoiseProfile& n,
-                           const DetectorSettings& st, bool hysteresis, bool* rejected) {
+bool PumpDetector::matches(const FrameScores& s, const PumpProfile& p, const DetectorSettings& st,
+                           bool hysteresis, bool* rejected) {
   if (rejected) *rejected = false;
   if (!p.valid) return false;
 
@@ -221,7 +250,7 @@ bool PumpDetector::matches(const FrameScores& s, const PumpProfile& p, const Noi
   const float pumpScore = p.templateCount == 0 && !p.periodic
                               ? st.similarityThreshold
                               : combined(p.periodic, s.similarity, s.rhythm);
-  if (n.count > 0 && combined(p.periodic, s.noiseSimilarity, s.noiseRhythm) > pumpScore) {
+  if (s.hasNoise && combined(p.periodic, s.noiseSimilarity, s.noiseRhythm) > pumpScore) {
     if (rejected) *rejected = true;
     return false;
   }
@@ -278,6 +307,38 @@ void PumpDetector::mergeProfile(PumpProfile& into, const PumpProfile& from, Stri
   ++into.recordings;
 }
 
+void PumpDetector::mergeNoise(NoiseProfile::Entry& into, const NoiseProfile::Entry& from) {
+  // Hintergrund und Pegel der neuen Aufnahme auf die Verstärkung des Eintrags
+  // umrechnen; Hintergrund mitteln, Pegel/Schwelle = jeweils tolerantere.
+  const float off = gainOffsetDb(into.micGain, from.micGain);
+  for (size_t b = 0; b < cfg::kNumBands; ++b) {
+    into.bgBandDb[b] = 0.5f * (into.bgBandDb[b] + from.bgBandDb[b] + off);
+  }
+  into.bgRmsDb = 0.5f * (into.bgRmsDb + from.bgRmsDb + off);
+  into.levelDb = fminf(into.levelDb, from.levelDb + off);
+  into.simThreshold = fminf(into.simThreshold, from.simThreshold);
+
+  // Muster anhängen, nahezu identische überspringen; ist kein Platz mehr,
+  // werden die ältesten verdrängt.
+  for (size_t t = 0; t < from.templateCount; ++t) {
+    bool duplicate = false;
+    for (size_t u = 0; u < into.templateCount && !duplicate; ++u) {
+      duplicate = dotBands(from.templates[t], into.templates[u]) > cfg::kTemplateMergeSimilarity;
+    }
+    if (duplicate) continue;
+    if (into.templateCount >= cfg::kNoiseTemplates) {
+      memmove(into.templates[0], into.templates[1],
+              sizeof(into.templates[0]) * (cfg::kNoiseTemplates - 1));
+      --into.templateCount;
+    }
+    memcpy(into.templates[into.templateCount++], from.templates[t], sizeof(from.templates[t]));
+  }
+  // Rhythmus-Fingerabdrücke mitteln
+  float sum[cfg::kAcfLen];
+  for (size_t k = 0; k < cfg::kAcfLen; ++k) sum[k] = into.rhythm[k] + from.rhythm[k];
+  normalizeCurve(sum, into.rhythm);
+}
+
 // ---------------------------------------------------------------------------
 // Laufende Erkennung
 // ---------------------------------------------------------------------------
@@ -308,25 +369,31 @@ void PumpDetector::updateGrinder(uint32_t now) {
   const FrameScores& s = status_.scores;
   const bool on = status_.grinderOn;
   bool raw = false;
-  if (grinder_ >= 0 && grinder_ < (int)noise_.count && !status_.rawActive && !status_.pumpOn) {
-    // Vergleichswert der Pumpe wie in matches(): Standardprofil ohne Muster -> Schwelle
-    const float pumpScore = profile_.templateCount == 0 && !profile_.periodic
-                                ? settings_.similarityThreshold
-                                : combined(profile_.periodic, s.similarity, s.rhythm);
-    const float simTh = settings_.similarityThreshold * (on ? kHystSimilarity : 1.0f);
-    // Die Mühle muss das ähnlichste Störgeräusch sein (nicht z. B. der Milchaufschäumer).
-    raw = s.noiseIndex == grinder_ && isLoud(status_.rmsDb, profile_, settings_, on) &&
-          s.grinderSimilarity >= simTh &&
+  if (s.bestIsGrinder && !status_.rawActive && !status_.pumpOn) {
+    // Vergleich mit der Pumpe nur, wenn sie eingelernt ist (Muster oder Takt).
+    // Ohne gelernte Pumpe entscheiden allein Schwelle und Pegel der Mühle.
+    const bool pumpLearned = profile_.templateCount > 0 || profile_.periodic;
+    const float pumpScore = pumpLearned ? combined(profile_.periodic, s.similarity, s.rhythm) : -2.0f;
+    // Pegel und Schwelle stammen aus der Aufnahme der Mühle selbst.
+    const NoiseProfile::Entry& e = grinders_->entries[s.grinderIndex];
+    const float simTh = e.simThreshold * (on ? kHystSimilarity : 1.0f);
+    const float lvlTh = kGrinderLevel * (on ? kHystLevel : 1.0f);
+    // Eine Mühle muss besser passen als alle Störgeräusche (bestIsGrinder) und als die Pumpe.
+    raw = s.grinderLevelRatio >= lvlTh && s.grinderSimilarity >= simTh &&
           combined(profile_.periodic, s.grinderSimilarity, s.grinderRhythm) >= pumpScore;
   }
 
   if (raw) {
     if (grinderSinceMs_ == 0) grinderSinceMs_ = now;
     grinderLastMs_ = now;
-    if (!on && now - grinderSinceMs_ >= kGrinderOnMs) status_.grinderOn = true;
+    if (!on && now - grinderSinceMs_ >= kGrinderOnMs) {
+      status_.grinderOn = true;
+      status_.grinderIndex = s.grinderIndex;
+    }
   } else if (grinderSinceMs_ && now - grinderLastMs_ > (on ? kGrinderOffMs : kGrinderGapMs)) {
     grinderSinceMs_ = 0;
     status_.grinderOn = false;
+    status_.grinderIndex = -1;
   }
 }
 
@@ -342,7 +409,9 @@ void PumpDetector::reset() {
 }
 
 PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curve) {
-  status_.rmsDb = f.rmsDb;
+  // Pegel in den Einheiten des Pumpenprofils (gelernt evtl. mit anderer Verstärkung)
+  const float rmsP = f.rmsDb + gainOffsetDb(profile_.micGain, gain_);
+  status_.rmsDb = rmsP;
   status_.periodic = profile_.periodic;
   if (!profile_.valid) {
     status_.scores = FrameScores{};
@@ -351,24 +420,31 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
   }
 
   // Gleichmäßigkeit über die aktuelle laute Phase
-  const bool loud = isLoud(f.rmsDb, profile_, settings_, status_.pumpOn);
+  const bool loud = isLoud(rmsP, profile_, settings_, status_.pumpOn);
   if (loud && steady_.runLength() == 0) loudSinceMs_ = f.timestampMs;
-  const float steadiness = steady_.update(f.rmsDb, loud);
+  const float steadiness = steady_.update(rmsP, loud);
 
-  status_.scores = score(f.bandDb, f.rmsDb, curve, steadiness, profile_, noise_, grinder_);
-  status_.rawActive = matches(status_.scores, profile_, noise_, settings_, status_.pumpOn,
+  status_.scores = score(f.bandDb, f.rmsDb, curve, steadiness, profile_, noise_, grinders_, gain_);
+  status_.rawActive = matches(status_.scores, profile_, settings_, status_.pumpOn,
                               &status_.rejected);
   updateGrinder(f.timestampMs);
-  // Solange die Mühle läuft (inkl. Nachlauf), keine Pumpe starten: das
-  // Auslaufen des Mahlwerks klingt kurz pumpenähnlich.
-  if (status_.grinderOn && !status_.pumpOn && status_.rawActive) {
+  // Vibration: allein entscheidend bzw. zusätzlich erforderlich
+  if (source_ == Source::Vib) {
+    status_.rawActive = vibActive_;
+    status_.rejected = false;
+  } else if (source_ == Source::Both) {
+    status_.rawActive = status_.rawActive && vibActive_;
+  }
+  // Nur Mikrofon: Solange die Mühle läuft (inkl. Nachlauf), keine Pumpe
+  // starten – das Auslaufen des Mahlwerks klingt kurz pumpenähnlich.
+  if (source_ == Source::Mic && status_.grinderOn && !status_.pumpOn && status_.rawActive) {
     status_.rawActive = false;
     status_.rejected = true;
   }
 
   // Standardprofil: Raumpegel nachführen (nach der Bewertung dieses Frames)
   const bool isDefault = profile_.isDefault();
-  if (isDefault) updateAutoBackground(f.rmsDb);
+  if (isDefault) updateAutoBackground(rmsP);
   status_.bgDb = profile_.bgRmsDb;
 
   // --- Entprellung -------------------------------------------------------------
@@ -386,7 +462,8 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
         // höchstens kMaxBackdateMs zurück, damit ein vorheriges anderes
         // Geräusch nicht mitgezählt wird.
         const uint32_t earliest = activeSinceMs_ - kMaxBackdateMs;
-        onsetMs_ = static_cast<int32_t>(earliest - loudSinceMs_) > 0 ? earliest : loudSinceMs_;
+        const uint32_t loudSince = source_ == Source::Vib ? vibSinceMs_ : loudSinceMs_;
+        onsetMs_ = static_cast<int32_t>(earliest - loudSince) > 0 ? earliest : loudSince;
         lastActiveMs_ = now;
         return Event::Started;
       }
@@ -399,8 +476,8 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
     const uint32_t maxMs = isDefault ? cfg::kMaxPumpMsDefault : cfg::kMaxPumpMsLearned;
     const bool tooLong = now - onsetMs_ > maxMs;
     if (tooLong && isDefault) {
-      profile_.bgRmsDb = f.rmsDb;
-      profile_.pumpRmsDb = f.rmsDb + cfg::kDefaultSpanDb;
+      profile_.bgRmsDb = rmsP;
+      profile_.pumpRmsDb = rmsP + cfg::kDefaultSpanDb;
     }
     if (status_.rawActive && !tooLong) {
       lastActiveMs_ = now;

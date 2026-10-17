@@ -45,6 +45,7 @@ struct SlotSummary {
   uint8_t recordings = 0;
   uint8_t templates = 0;
   uint8_t noiseCount = 0;
+  uint8_t grinderCount = 0;
   float periodHz = 0.0f;
   float quality = 0.0f;
 };
@@ -98,8 +99,19 @@ struct StatusSnapshot {
   float doseG = NAN;              ///< zuletzt gewogene Dosis (für den nächsten Bezug)
 
   // Mühle
-  int8_t grinderNoise = -1;       ///< Störgeräusch, das die Mühle ist (-1 = keines)
-  bool grinderOn = false;         ///< Mühle läuft gerade
+  uint8_t grinderCount = 0;       ///< gelernte Mühlen
+  char grinderNames[cfg::kMaxGrinders][GrinderProfile::kNameLen] = {};
+  bool grinderOn = false;         ///< eine Mühle läuft gerade
+  int8_t grinderActive = -1;      ///< welche (-1 = keine)
+
+  // Vibration (Beschleunigungssensor)
+  uint8_t vibMode = 0;            ///< vibration::Mode
+  bool vibAvailable = false;
+  bool vibActive = false;
+  float vibLevelDb = -120.0f;
+  float vibBaselineDb = -120.0f;
+  float vibThresholdDb = 8.0f;
+  float vibSteadiness = 99.0f;
 
   // Mikrofon
   uint8_t micGain = cfg::kMicGainDefault;
@@ -113,6 +125,11 @@ class App {
  public:
   /// Lädt Einstellungen/Profil, startet Mikrofon und Audio-Task.
   void begin();
+
+  /// Zyklisch aus loop() aufrufen: speichert geänderte Einstellungen verzögert.
+  void loop();
+  /// Noch nicht gespeicherte Einstellungen sofort speichern (z. B. beim Verlassen des Menüs).
+  void flushSettings();
 
   /// Liefert eine threadsichere Kopie des aktuellen Zustands.
   void snapshot(StatusSnapshot& out);
@@ -128,7 +145,8 @@ class App {
   void cmdFinishTeach();
   /**
    * Übernimmt das Teach-Ergebnis (Pumpe: Profil, Störgeräusch: Liste ergänzen).
-   * @param add   Pumpe: false = Profil ersetzen, true = bestehendes Profil ergänzen
+   * @param add   Pumpe: false = Profil ersetzen, true = bestehendes Profil ergänzen;
+   *              Mühle: false = neue Mühle, true = der ähnlichsten Mühle hinzufügen
    * @param note  optional: erhält einen Hinweistext
    * @return false bei Fehler-Ergebnis
    */
@@ -140,9 +158,9 @@ class App {
   void cmdClearNoise();
   /// Löscht ein einzelnes Störgeräusch (Index 0..count-1).
   bool cmdDeleteNoise(uint8_t index);
-  /// Markiert ein Störgeräusch als Mühle (-1 = keines). Läuft die Mühle,
-  /// wird die Waage auf das negative Siebträgergewicht tariert.
-  bool cmdSetGrinder(int8_t index);
+  /// Löscht bzw. benennt eine gelernte Mühle (Index 0..count-1).
+  bool cmdDeleteGrinder(uint8_t index);
+  bool cmdRenameGrinder(uint8_t index, const String& name);
   /// Löscht ein einzelnes Klangmuster der Pumpe (das letzte bleibt immer erhalten).
   bool cmdDeleteTemplate(uint8_t index);
 
@@ -151,8 +169,6 @@ class App {
   void slots(SlotSummary (&out)[cfg::kProfileSlots], uint8_t& active);
   /// Wechselt den aktiven Slot (lädt Profil, Störgeräusche, Schwellen).
   void cmdSelectSlot(uint8_t slot);
-  /// Wechselt zum nächsten Slot (für den Display-Button).
-  void cmdNextSlot();
   bool cmdRenameSlot(uint8_t slot, const String& name);
   /// Löscht einen Slot (danach Standardprofil).
   bool cmdDeleteSlot(uint8_t slot);
@@ -162,8 +178,11 @@ class App {
 
   /// Setzt die Mikrofon-Verstärkung (wird im Audio-Task übernommen).
   void cmdSetMicGain(uint8_t gain);
+  /// Timer auf 0; mit verbundener Waage zusätzlich Tara und deren Timer auf 0.
   void cmdResetTimer();
   void cmdClearHistory();
+  /// Übernimmt Einstellungen sofort; gespeichert wird erst, wenn sie
+  /// cfg::kSettingsSaveDelayMs lang unverändert bleiben (schont den Flash).
   void cmdApplySettings(DetectorSettings s);
 
  private:
@@ -202,6 +221,8 @@ class App {
   char slotName_[ProfileSlot::kNameLen] = {};
   SlotSummary summaries_[cfg::kProfileSlots];
   bool lastSaveOk_ = true;
+  bool settingsDirty_ = false;      ///< Einstellungen geändert, noch nicht gespeichert
+  uint32_t settingsChangedMs_ = 0;  ///< Zeitpunkt der letzten Änderung
 
   // Mikrofon
   std::atomic<uint8_t> requestedGain_{cfg::kMicGainDefault};
@@ -210,8 +231,9 @@ class App {
 
   // Waage
   uint32_t weightUntilMs_ = 0;  ///< bis dahin Endgewicht nachführen (0 = aus)
+  uint32_t weightTares_ = 0;    ///< Tara-Zähler beim Pumpenstopp (Tara beendet das Nachführen)
   void handleGrinder(const AudioFrame& f);  ///< Dosier-Tara und Dosis (unter Mutex)
-  int8_t grinder_ = -1;         ///< Störgeräusch "Mühle" des aktiven Slots
+  GrinderProfile grinders_;     ///< Mühlen des aktiven Slots (Detektor hält einen Zeiger)
   bool grinderWasOn_ = false;
   float doseG_ = NAN;           ///< zuletzt gewogene Dosis
   uint32_t doseAtMs_ = 0;       ///< Zeitpunkt der Dosis

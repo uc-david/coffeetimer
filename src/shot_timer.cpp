@@ -4,11 +4,6 @@
  */
 #include "shot_timer.h"
 
-namespace {
-/// Ab diesem Zeitstempel gilt die Systemzeit als per NTP gesetzt (Jahr > 2020).
-constexpr time_t kValidEpoch = 1600000000;
-}  // namespace
-
 void ShotTimer::start(uint32_t startMs) {
   running_ = true;
   startMs_ = startMs;
@@ -26,7 +21,7 @@ bool ShotTimer::stop(uint32_t endMs, uint32_t minHistoryMs) {
     r.weightG = NAN;
     r.doseG = NAN;
     const time_t now = time(nullptr);
-    r.endEpoch = now > kValidEpoch ? now : 0;
+    r.endEpoch = now > cfg::kValidEpoch ? now : 0;
     historyHead_ = (historyHead_ + 1) % cfg::kHistorySize;
     if (historyCount_ < cfg::kHistorySize) ++historyCount_;
   }
