@@ -19,7 +19,8 @@
  * Betriebsarten (im NVS gespeichert, gelten für alle Profile):
  *  - Mic:   nur Mikrofon (bisheriges Verhalten)
  *  - Vib:   nur Vibration
- *  - Both:  Mikrofon UND Vibration müssen die Pumpe erkennen (am robustesten)
+ *  - Both:  Start nur, wenn Mikrofon UND Vibration die Pumpe erkennen; danach
+ *           genügt eines (die Pumpe wird unter Druck oft leiser) – am robustesten
  */
 #pragma once
 

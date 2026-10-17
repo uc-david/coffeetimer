@@ -91,7 +91,7 @@ Einstellbar unter *EINST. → Erkennung* bzw. auf der Webseite:
 |---|---|
 | **Mikrofon** | Klang und Rhythmus der Pumpe |
 | **Vibration** | Beschleunigungssensor, 400 Messungen/s; CoreS3 muss fest auf der Maschine stehen |
-| **Mikrofon + Vibration** | beides muss passen – am zuverlässigsten |
+| **Mikrofon + Vibration** | Start nur, wenn beides passt; läuft die Pumpe, genügt eines (unter Druck wird sie oft leiser) – am zuverlässigsten |
 
 **Mikrofon:** Alle 32 ms wird ein 64-ms-Fenster per FFT ausgewertet:
 

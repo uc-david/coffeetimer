@@ -435,7 +435,9 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
     status_.rawActive = vibActive_;
     status_.rejected = false;
   } else if (source_ == Source::Both) {
-    status_.rawActive = status_.rawActive && vibActive_;
+    // Start: Mikrofon UND Vibration (robust gegen Fehlstarts). Läuft die Pumpe,
+    // genügt eines davon – unter Druck wird sie oft deutlich leiser, vibriert aber weiter.
+    status_.rawActive = status_.pumpOn ? (status_.rawActive || vibActive_) : (status_.rawActive && vibActive_);
   }
   // Nur Mikrofon: Solange die Mühle läuft (inkl. Nachlauf), keine Pumpe
   // starten – das Auslaufen des Mahlwerks klingt kurz pumpenähnlich.

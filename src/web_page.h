@@ -215,7 +215,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       <select id="vibMode" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px;width:100%">
         <option value="0">Mikrofon (Geräusch)</option>
         <option value="1">Vibration (CoreS3 steht auf der Maschine)</option>
-        <option value="2">Mikrofon + Vibration (beides muss passen)</option>
+        <option value="2">Mikrofon + Vibration (Start: beides, danach genügt eines)</option>
       </select>
     </div>
     <div class="field">
