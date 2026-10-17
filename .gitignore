@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Lokale Dateien (nicht veröffentlichen)
+*.code-workspace
+profile_backup*/
