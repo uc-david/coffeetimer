@@ -89,6 +89,17 @@ Button btnBack    {216, kBtnY, 100, kBtnH, "ZURÜCK",      kColAccent, kColDark,
 
 M5Canvas canvas(&M5.Display);
 Screen screen = Screen::Main;
+
+/// Große Anzeige im Hauptbildschirm: automatisch (beim Mahlen Gewicht, sonst
+/// Timer) oder per Antippen fest auf Timer bzw. Gewicht umgeschaltet.
+enum class BigView { Auto, Timer, Weight };
+BigView bigView = BigView::Auto;
+bool bigShowsWeight = false;   ///< was gerade groß angezeigt wird (für das Antippen)
+bool lastDoseMode = false;     ///< Zustandswechsel setzen die Umschaltung zurück
+bool lastTimerRunning = false;
+/// Bereich der großen Zahl (zwischen Statuszeile und Gewichtszeile).
+constexpr int kBigTop = 56;
+constexpr int kBigBottom = 140;
 StatusSnapshot snap;  // groß -> statisch statt auf dem Stack
 uint32_t lastDrawMs = 0;
 
@@ -281,24 +292,64 @@ void drawMain() {
     canvas.drawString(prof, kW - 8, 42);
   }
 
-  // --- Großer Timer ------------------------------------------------------------
-  canvas.setFont(kFontTimer);
-  canvas.setTextSize(2);
-  canvas.setTextColor(snap.timerRunning ? kColRun : kColText);
-  canvas.setTextDatum(textdatum_t::middle_center);
-  canvas.drawString(formatSeconds(snap.timerMs), kW / 2 - 10, 100);
-  canvas.setTextSize(1);
-  canvas.setFont(kFontBold);
-  canvas.setTextColor(kColMuted);
-  canvas.setTextDatum(textdatum_t::bottom_left);
-  canvas.drawString("s", kW / 2 + 128, 145);
+  // --- Große Anzeige: Timer oder Gewicht ----------------------------------------
+  // Automatisch: beim Mahlen (Mühlen-Tara bis zum Pumpenstart) das Kaffeemehl,
+  // sonst der Timer. Antippen schaltet um; beginnt das Mahlen oder ein Bezug
+  // bzw. endet einer, gilt wieder die Automatik.
+  if (snap.scaleDoseMode != lastDoseMode || snap.timerRunning != lastTimerRunning) {
+    bigView = BigView::Auto;
+    lastDoseMode = snap.scaleDoseMode;
+    lastTimerRunning = snap.timerRunning;
+  }
+  const bool weightKnown = snap.scaleEnabled && !isnan(snap.scaleWeight);
+  const bool showDose = snap.scaleDoseMode && !snap.timerRunning;  // automatisch Gewicht
+  bigShowsWeight = weightKnown && (bigView == BigView::Weight || (bigView == BigView::Auto && showDose));
+  if (bigShowsWeight) {
+    char num[16];
+    snprintf(num, sizeof(num), "%.1f", snap.scaleWeight);
+    canvas.setFont(kFontTimer);
+    canvas.setTextSize(2);
+    // z. B. "-491.6" ist breiter als der Timer -> auf die verfügbare Breite verkleinern
+    constexpr int kMaxWidth = 250;
+    const int w2 = canvas.textWidth(num);
+    const float size = w2 > kMaxWidth ? 2.0f * kMaxWidth / w2 : 2.0f;
+    canvas.setTextSize(size);
+    const int w = canvas.textWidth(num);
+    canvas.setTextColor(snap.timerRunning ? kColRun : kColAccent);
+    canvas.setTextDatum(textdatum_t::middle_center);
+    canvas.drawString(num, kW / 2 - 10, 100);
+    canvas.setTextSize(1);
+    canvas.setFont(kFontBold);
+    canvas.setTextColor(kColMuted);
+    canvas.setTextDatum(textdatum_t::bottom_left);
+    canvas.drawString("g", kW / 2 - 10 + w / 2 + 6, 145);
+  } else {
+    canvas.setFont(kFontTimer);
+    canvas.setTextSize(2);
+    canvas.setTextColor(snap.timerRunning ? kColRun : kColText);
+    canvas.setTextDatum(textdatum_t::middle_center);
+    canvas.drawString(formatSeconds(snap.timerMs), kW / 2 - 10, 100);
+    canvas.setTextSize(1);
+    canvas.setFont(kFontBold);
+    canvas.setTextColor(kColMuted);
+    canvas.setTextDatum(textdatum_t::bottom_left);
+    canvas.drawString("s", kW / 2 + 128, 145);
+  }
 
   // --- Waage (optional) bzw. letzte Bezüge ---------------------------------------
   if (snap.scaleEnabled) {
     // Gewicht und (während des Bezugs) Durchfluss; links TARA, rechts ZEIT 0
     char buf[40];
     if (!isnan(snap.scaleWeight)) {
-      if (snap.scaleDoseMode) {
+      if (bigShowsWeight) {
+        // Gewicht steht groß oben -> hier die Zeit (und ggf. was gewogen wird)
+        if (snap.timerRunning) {
+          snprintf(buf, sizeof(buf), "%s s   %.1f g/s", formatSeconds(snap.timerMs).c_str(), snap.scaleFlow);
+        } else {
+          snprintf(buf, sizeof(buf), "%sBezug %s s", snap.scaleDoseMode ? "Kaffeemehl  ·  " : "",
+                   formatSeconds(snap.timerMs).c_str());
+        }
+      } else if (snap.scaleDoseMode) {
         snprintf(buf, sizeof(buf), "Mehl %.1f g", snap.scaleWeight);
       } else if (snap.timerRunning) {
         snprintf(buf, sizeof(buf), "%.1f g   %.1f g/s", snap.scaleWeight, snap.scaleFlow);
@@ -900,6 +951,9 @@ void handleTouch() {
     case Screen::Main:
       if (btnTeach.hit(x, y)) {
         screen = Screen::TeachSelect;
+      } else if (y >= kBigTop && y < kBigBottom && snap.scaleEnabled && !isnan(snap.scaleWeight)) {
+        // Große Zahl antippen: zwischen Timer und Gewicht umschalten
+        bigView = bigShowsWeight ? BigView::Timer : BigView::Weight;
       } else if (snap.scaleEnabled && btnScaleTare.hit(x, y)) {
         scale::tare();
       } else if (snap.scaleEnabled && btnScaleTime.hit(x, y)) {

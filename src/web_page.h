@@ -33,6 +33,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
   .timer { font-size: 88px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums;
            line-height: 1; margin: 8px 0 4px; }
   .timer.running { color: var(--run); }
+  .timer.dose { color: var(--accent); font-size: 72px; }
   .timer small { font-size: 32px; color: var(--muted); }
   .hint { text-align: center; color: var(--muted); font-size: 14px; min-height: 18px; }
   .meter { margin: 10px 0; }
@@ -79,7 +80,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
 
   <!-- Timer ------------------------------------------------------------- -->
   <section class="card" id="timerCard">
-    <div id="timer" class="timer">0.0<small>s</small></div>
+    <div id="timer" class="timer" onclick="toggleBigView()" title="Antippen: Timer / Gewicht">0.0<small>s</small></div>
     <div id="weightLine" class="hidden" style="text-align:center;font-size:28px;font-weight:700;font-variant-numeric:tabular-nums">
       <span id="weight">–</span> <small id="flow" style="font-size:16px;color:var(--muted)"></small>
       <button style="min-width:0;padding:4px 10px;margin-left:8px;font-size:13px" onclick="post('/api/scale/tare')">Tara</button>
@@ -323,6 +324,14 @@ let maxGrinders = 3;    // vom Gerät (profile.maxGrinders)
 let lastSlot = -1;
 let micLoaded = false;
 let scaleLoaded = false;
+// Große Anzeige: 'auto' | 'timer' | 'weight'
+let bigView = 'auto', bigLastDose = false, bigLastRunning = false;
+let bigShowsWeight = false, weightKnown = false;
+function toggleBigView() {
+  if (!weightKnown) return;
+  bigView = bigShowsWeight ? 'timer' : 'weight';
+  poll();  // sofort neu zeichnen
+}
 let vibLoaded = false;
 let lastOk = Date.now();
 
@@ -377,9 +386,23 @@ function render(s) {
   bEl.style.color = b.level < 0 ? 'var(--muted)' : b.level > 50 ? 'var(--ok)' : b.level > 20 ? 'var(--warn)' : 'var(--err)';
 
   // Timer
+  // Große Anzeige wie am Display: automatisch beim Mahlen das Kaffeemehl, sonst
+  // der Timer; Klick schaltet um, Beginn/Ende von Mahlen oder Bezug -> wieder Automatik.
   const t = $('timer');
-  t.innerHTML = fmtSec(s.timerMs) + '<small>s</small>';
+  if (s.scale.doseMode !== bigLastDose || s.running !== bigLastRunning) {
+    bigView = 'auto';
+    bigLastDose = s.scale.doseMode;
+    bigLastRunning = s.running;
+  }
+  weightKnown = s.scale.enabled && s.scale.weight !== undefined;
+  const autoWeight = s.scale.doseMode && !s.running;
+  bigShowsWeight = weightKnown && (bigView === 'weight' || (bigView === 'auto' && autoWeight));
+  t.innerHTML = bigShowsWeight
+    ? s.scale.weight.toFixed(1) + `<small>g${s.scale.doseMode ? ' Mehl' : ''}</small>`
+    : fmtSec(s.timerMs) + '<small>s</small>';
   t.classList.toggle('running', s.running);
+  t.classList.toggle('dose', bigShowsWeight);
+  t.style.cursor = weightKnown ? 'pointer' : '';
   $('hint').textContent = !s.profile.saveOk ? '⚠ Speichern fehlgeschlagen – Profil geht beim Neustart verloren!'
                         : s.running ? 'Bezug läuft …' : '';
   $('profileLine').textContent = `Profil ${s.profile.slot + 1}: ${s.profile.name}` +
@@ -389,7 +412,9 @@ function render(s) {
   // Waage
   const sc = s.scale;
   $('weightLine').classList.toggle('hidden', !sc.enabled);
+  // Steht das Gewicht groß oben, zeigt diese Zeile stattdessen die Zeit.
   $('weight').textContent = sc.weight === undefined ? 'Waage ' + sc.state
+    : bigShowsWeight ? (sc.doseMode && !s.running ? 'Kaffeemehl · Bezug ' : '') + fmtSec(s.timerMs) + ' s'
     : (sc.doseMode ? 'Mehl ' : '') + sc.weight.toFixed(1) + ' g';
   $('flow').textContent = sc.weight !== undefined && s.running ? sc.flow.toFixed(1) + ' g/s'
     : sc.dose !== undefined ? `Dosis ${sc.dose.toFixed(1)} g` : '';
