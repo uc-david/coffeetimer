@@ -1,156 +1,173 @@
-# Coffee Timer (M5Stack CoreS3)
+# Coffee Timer für Siebträgermaschinen (M5Stack CoreS3)
 
-Erkennt am Geräusch, wann die Pumpe einer Siebträger-Kaffeemaschine läuft, und misst die Bezugszeit.
-Bedienung am Gerät (Touch) und parallel über eine Webseite.
+Ein Shot-Timer, der **ohne Eingriff in die Maschine** erkennt, wann die Pumpe läuft – am Geräusch und optional
+an der Vibration. Er misst die Bezugszeit, arbeitet mit gängigen **Bluetooth-Kaffeewaagen** zusammen und wiegt
+beim Mahlen automatisch das **Kaffeemehl** ab. Bedienung am Touch-Display und parallel über eine Webseite.
 
-## Erste Inbetriebnahme
+## Funktionen
 
-1. Flashen: `pio run -t upload`
-2. Ohne WLAN-Konfiguration öffnet das Gerät den Access-Point **CoffeeTimer-XXXX** (offen).
-   Damit verbinden, `http://192.168.4.1` öffnen, unter *WLAN* die Zugangsdaten eintragen → Neustart.
-3. Danach ist die Seite unter `http://coffeetimer.local` bzw. der IP in der Kopfzeile des Displays erreichbar.
-   Klappt die Verbindung nicht innerhalb von 15 s, öffnet das Gerät wieder den Access-Point.
+- **Automatischer Shot-Timer:** startet und stoppt mit der Pumpe – erkannt über das Mikrofon, den
+  Beschleunigungssensor (Gerät steht auf der Maschine) oder beides zusammen.
+- **Einlernen statt Einstellen:** Pumpe, Mühlen und Störgeräusche (z. B. Milchaufschäumer) werden jeweils
+  einmal aufgenommen. Jede Aufnahme ist eigenständig – die Reihenfolge ist egal.
+- **Bluetooth-Waagen:** Felicita (Arc, Incline, Parallel), Acaia (Lunar, Pearl, Pyxis, Cinco …),
+  Bookoo Themis, Decent Scale. Gewicht und Durchfluss live, Endgewicht in der Historie.
+- **Mühlen-Tara:** Läuft eine eingelernte Mühle, wird die leere Waage auf *−Siebträgergewicht* tariert. Legst du
+  danach den gefüllten Siebträger auf, steht dort direkt das Kaffeemehl – groß auf dem Display. Die Dosis wird dem
+  nächsten Bezug zugeordnet (Historie: `18,0 g → 36,2 g (1:2,0)`).
+- **Bis zu 3 Mühlen** und 3 Störgeräusche je Profil, **5 Profile** (z. B. verschiedene Maschinen).
+- **Uhrzeit** per NTP, gespeichert in der eingebauten RTC (läuft auch ohne WLAN weiter).
+- **Webseite** mit allen Einstellungen, Historie, Profil-Export/-Import, Diagnosebericht und Firmware-Update.
+- **Akkuanzeige**, Firmware-Update über WLAN, Access-Point zur Ersteinrichtung.
 
-## WLAN
+## Hardware
 
-- Ohne gespeichertes WLAN öffnet der CoreS3 den Access-Point **CoffeeTimer-XXXX** (offen, `http://192.168.4.1`).
-- Auf der Webseite unter **WLAN → WLAN konfigurieren** SSID und Passwort eintragen → Gerät startet neu und
-  verbindet sich. Die IP steht oben rechts im Display (grün = verbunden, gelb = Access-Point).
-- Ist das WLAN nicht erreichbar, kommt nach 15 s wieder der Access-Point; die Verbindung wird im Hintergrund
-  weiter versucht. Leere SSID speichern = zurück zum Access-Point.
-- Nur 2,4-GHz-Netze (ESP32-S3 kann kein 5 GHz).
+- **M5Stack CoreS3** (ESP32-S3, Touch-Display, Mikrofon, Beschleunigungssensor, RTC, Akku)
+- optional eine der oben genannten Bluetooth-Waagen
 
-## Firmware-Update (OTA)
+## Installation
 
-- **Webseite:** In PlatformIO bauen, dann unter *Firmware-Update* die Datei
-  `.pio/build/m5stack-cores3/firmware.bin` hochladen.
-- **PlatformIO direkt:** `pio run -e m5stack-cores3-ota -t upload` (bzw. in VS Code die Umgebung
-  *m5stack-cores3-ota* wählen → Upload). Geht `coffeetimer.local` nicht, `upload_port` auf die IP setzen.
-- Das Update landet im zweiten App-Slot und wird erst nach erfolgreicher Prüfung aktiv; bei Abbruch läuft die
-  alte Firmware weiter. Profil und Einstellungen (NVS) bleiben erhalten.
-- Der erste Flash nach dieser Änderung muss einmal per USB erfolgen.
+1. [PlatformIO](https://platformio.org/) installieren (z. B. als Erweiterung für VS Code).
+2. Repository klonen und den CoreS3 per USB anschließen.
+3. Bauen und flashen: `pio run -t upload`
+   (klappt die Verbindung nicht: Reset-Taste ca. 2 s halten, bis die grüne LED leuchtet → Download-Modus).
+4. Ohne WLAN-Daten öffnet das Gerät den Access-Point **CoffeeTimer-XXXX** (offen). Damit verbinden,
+   `http://192.168.4.1` öffnen, unter *WLAN* die Zugangsdaten eintragen → das Gerät startet neu.
+5. Danach ist die Webseite unter `http://coffeetimer.local` bzw. der IP oben im Display erreichbar.
 
-## Profile
+Nur 2,4-GHz-WLAN. Ist das Netz nicht erreichbar, öffnet das Gerät nach 15 s wieder den Access-Point und
+versucht die Verbindung im Hintergrund weiter.
 
-- **5 Profil-Plätze** (z. B. verschiedene Maschinen oder Aufstellorte). Jeder speichert Pumpenprofil,
-  Störgeräusche und Schwellen. Wechseln am Display (**INFO → PROFIL**) oder auf der Webseite (*Profile*).
-- **Standardprofil:** Leere Plätze funktionieren ohne Teach – erkannt wird jedes *gleichmäßige* Geräusch (±1,5 dB,
-  mind. 1 s) deutlich über dem **automatisch gemessenen Raumpegel** (fällt schnell, steigt langsam mit ≈0,5 dB/s).
-  Niesen, Sprechen, Klappern und Dauergeräusche (Lüfter) lösen nicht aus; eine gleichmäßige Mühle schon → als
-  Störgeräusch einlernen oder besser einen Teach durchführen. Notlösung – zuverlässig erst mit Teach.
-- **Sicherung:** Meldet die Erkennung länger als 60 s (Standardprofil) bzw. 120 s (gelernt) „Pumpe“, stoppt der Timer.
-- Umbenennen, Löschen, **Export als Datei** (Sicherung) und **Import** auf der Webseite.
-- Gespeichert wird im Dateisystem (LittleFS); Speicherfehler werden am Display und auf der Webseite angezeigt.
-  Ein Profil aus Firmware 1.3/1.4 wird beim ersten Start – falls noch vorhanden – in Platz 1 übernommen.
+## Erste Schritte
+
+1. Gerät nah an die Maschine stellen (die Pumpe sitzt meist unten/hinten) – für die Vibrationserkennung
+   **auf** die Maschine, z. B. auf die Tassenablage.
+2. **TEACH → PUMPE:** einen normalen Bezug einlernen.
+3. **TEACH → MÜHLE:** jede Mühle einmal mahlen lassen (für die Mühlen-Tara und damit sie nicht als Pumpe gilt).
+4. Optional **TEACH → STÖRGER.** für weitere Geräusche wie den Milchaufschäumer.
+5. Optional Waage einschalten, Siebträger wiegen und *Mühlen-Tara* aktivieren (siehe [Waage](#waage)).
+
+Ohne Teach arbeitet ein **Standardprofil**: Es erkennt jedes gleichmäßige Geräusch deutlich über dem
+automatisch gemessenen Raumpegel. Das ist nur eine Notlösung – zuverlässig wird es mit dem Teach.
 
 ## Bedienung am Display
 
-- **TEACH**: Pumpe oder Störgeräusch einlernen · **RESET**: Timer auf 0 · **INFO**: Übersicht
-- **INFO → EINST.**: alle Einstellungen der Webseite. Zeile antippen, mit **− / +** ändern; unten auf
-  „< Seite >“ tippen zum Blättern. Enthalten: Profil wechseln, Pegel-, Muster- bzw. Takt-Schwelle,
-  Ein-/Ausschaltverzögerung, Mindestdauer, Mikrofon-Verstärkung, einzelnes Störgeräusch bzw. Klangmuster löschen,
-  Historie löschen, Profil zurücksetzen. Lösch-Aktionen erst nach zweitem Tippen („SICHER?“).
-- Profil-Kurzinfo: *Aufnahmen* = Anzahl Teach-Aufnahmen, *Muster* = gelernte Klangbilder (z. B. Anlauf / voller
-  Druck; eines muss passen), *Takt* = Pumpentakt (Vibrationspumpe), *Q* = Qualität 0–100,
-  *Störger.* = eingelernte Störgeräusche.
+**Hauptbildschirm**
 
-## Waage (optional): Felicita Arc
+- Statuszeile: *Bereit*, *Pumpe läuft*, *<Mühle> läuft*, *Störgeräusch – ignoriert*; rechts das aktive Profil.
+- Große Zahl: der Timer – beim Mahlen automatisch das Kaffeemehl. **Antippen** schaltet zwischen Timer und
+  Gewicht um; beginnt oder endet das Mahlen bzw. ein Bezug, gilt wieder die Automatik.
+- Waagenzeile mit **TARA** (Gewicht auf 0) und **ZEIT 0** (Timer der Waage auf 0).
+- Messbalken der Erkennung (Pegel, Takt/Rhythmus bzw. Klangmuster, ggf. Vibration).
+- **TEACH** · **RESET** (Timer, Gewicht und Waagen-Timer auf 0) · **INFO**
 
-- Einschalten auf der Webseite (*Waage*) oder am Display (**INFO → EINST. → Waage +**). Die Waage einschalten –
-  sie wird über Bluetooth LE automatisch gefunden (Name beginnt mit „FELICITA“) und bei Abbruch neu verbunden.
-  Ausgeschaltet wird Bluetooth gar nicht gestartet.
-- Anzeige: Gewicht unter dem Timer, während des Bezugs zusätzlich Durchfluss (g/s); Webseite ebenso.
-- **Auto-Tara** (Standard an): beim Erkennen des Pumpenstarts wird die Waage tariert.
-  **Waagen-Timer** (optional): Timer der Waage startet/stoppt mit der Pumpe.
-- Tarieren von Hand: Gewichtszeile am Display antippen, *EINST. → Waage tarieren* oder Webseite.
-- Historie: Endgewicht je Bezug, inkl. 4 s Nachtropfen nach dem Pumpenstopp.
-- Protokoll: Service `FFE0` / Characteristic `FFE1`; 18-Byte-Pakete mit Vorzeichen und 6 Ziffern (0,01 g),
-  Befehle `T` (Tara), `R`/`S`/`C` (Timer). Der Diagnose-Bericht zeigt das letzte Rohpaket.
+**INFO** zeigt WLAN, Adresse, Profil und Kennwerte; **EMPF − / +** ändert die Empfindlichkeit.
+**EINST.** enthält alle Einstellungen: Zeile antippen, mit **− / +** ändern, unten auf „< Seite >“ blättern.
+Lösch-Aktionen erst nach zweitem Tippen („SICHER?“). Änderungen wirken sofort und werden kurz danach gespeichert.
 
-## Mikrofon
+## Einlernen (Teach)
 
-Verstärkung auf der Webseite einstellbar (1×–64×, Standard 16×). Bei Übersteuerung erscheint eine Warnung
-(Webseite, INFO-Screen). Profile merken sich die Verstärkung beim Teach und werden bei einer Änderung
-automatisch umgerechnet – kein neuer Teach nötig.
+Jede Aufnahme beginnt mit **3 s Ruhe** – dabei wird der Hintergrund gemessen. Jedes Geräusch speichert seinen
+eigenen Hintergrund, Pegel, seine eigene Schwelle und die Mikrofon-Verstärkung; spätere Aufnahmen anderer
+Geräusche ändern daran nichts.
 
-## Teach-Modus
-
-Das Gerät nah an der Maschine aufstellen (Pumpe sitzt meist unten/hinten). Dann **TEACH** (Display oder Webseite):
-
-| Schritt | Was tun | Dauer |
+| Modus | Ablauf | Ergebnis |
 |---|---|---|
-| 1 | Ruhe, Pumpe **aus** – Hintergrund wird aufgenommen | 3 s |
-| 2 | Einen ganz normalen **Bezug starten** (am besten mit Kaffee) | wartet max. 20 s |
-| 3 | Bezug wie gewohnt beenden – Aufnahme endet automatisch, wenn die Pumpe 4 s still ist (oder **FERTIG**) | bis 60 s |
+| **Pumpe** | Ruhe → normalen Bezug starten (am besten mit Kaffee) → endet automatisch, wenn die Pumpe 4 s still ist (oder **FERTIG**) | **Ersetzen** oder **Ergänzen** (z. B. Leerbezug + echter Bezug) |
+| **Mühle** | Ruhe → mahlen lassen → ausschalten | **Neue Mühle** oder **Ergänzen** der ähnlichsten Mühle (anderer Mahlgrad, leer gelaufen) |
+| **Störgeräusch** | Ruhe → Gerät einschalten → ausschalten | wird künftig ignoriert |
 
-Ausgewertet wird:
-
-- **Takt** (Autokorrelation der Hüllkurve): Vibrationspumpen schlagen im Netztakt (50 Hz). Dieser Rhythmus
-  bleibt unter Druck exakt gleich, auch wenn sich der Klang stark ändert.
-- **Klangmuster**: bis zu 3 Spektren je Aufnahme (z. B. Anlauf / Druckaufbau / voller Druck).
-- **Schwellen** werden aus der Aufnahme berechnet und beim Speichern übernommen.
-- **Pausen** (Pre-Infusion) werden erkannt; die Ausschaltverzögerung wird so gesetzt, dass sie überbrückt werden.
-
-Die Bewertung (0–100 Punkte, **OK / Warnung / Fehler**) prüft u. a., welcher Anteil der Aufnahme mit den
-berechneten Schwellen tatsächlich erkannt würde und ob der Hintergrund fälschlich auslösen würde – jeweils mit
-Begründung und Tipp (Übersteuerung, zu leise, zu wenig Abstand zum Hintergrund, unruhiger Hintergrund,
-unspezifisches Klangmuster …).
-
-Danach: **Ersetzen** (neues Profil) oder **Ergänzen** (z. B. erst Leerbezug, dann echter Bezug – beide werden erkannt).
-
-### Störgeräusch einlernen (z. B. Mühle)
-
-**TEACH → STÖRGER.** (bzw. „Störgeräusch einlernen“ auf der Webseite), dann die Mühle laufen lassen. Gespeichert
-werden Klangmuster und Rhythmus-Fingerabdruck des Geräuschs; klingt etwas künftig einem Störgeräusch ähnlicher als
-der Pumpe, wird es ignoriert (Display: „Störgeräusch – ignoriert“). Das Ergebnis zeigt, zu wie viel % das Geräusch
-vorher bzw. nachher als Pumpe erkannt wird, und warnt, falls es der Pumpe so ähnlich ist, dass auch die Pumpe
-unterdrückt werden könnte. Bis zu 3 Störgeräusche; löschen auf der Webseite.
+Die Auswertung bewertet jede Aufnahme (0–100 Punkte, OK / Warnung / Fehler) mit Begründung und Tipps – etwa
+bei Übersteuerung, zu leiser Pumpe oder unruhigem Hintergrund – und setzt passende Schwellen automatisch.
 
 ## Erkennung
 
-Alle 32 ms wird ein 64-ms-Fenster ausgewertet (geglättet, damit das Pulsieren einer Vibrationspumpe nicht als
-Schwankung erscheint). Die Pumpe gilt als *an*, wenn der Pegel ≥ *Pegel-Schwelle* ist (Anteil zwischen
-Hintergrund und dem *leisen* Teil der Pumpe), der Pegel über ~0,5 s **gleichmäßig** ist (Grenze aus dem Teach;
-Niesen, Sprechen, Klappern schwanken stärker) **und**
+Einstellbar unter *EINST. → Erkennung* bzw. auf der Webseite:
 
-- bei Pumpen **mit Takt** (Vibrationspumpe): die Takt-Stärke ≥ *Takt-Schwelle* ist **und** die Rhythmus-Form
-  zum gelernten Fingerabdruck passt – unabhängig vom Klang, daher gleich gut bei Leerbezug und echtem Bezug.
-  Die Rhythmus-Form unterscheidet die Pumpe (ein Schlag je Netzperiode) von netzbrummenden Motoren wie Mühlen
-  (Brummen mit 100 Hz),
-- bei Pumpen **ohne Takt** (Rotationspumpe): das Klangmuster ≥ *Klangmuster-Schwelle* ist. Verglichen wird
-  die Klangfarbe (welche Frequenzbänder relativ stärker sind), nicht die Lautstärke,
-- und das Geräusch keinem gelernten Störgeräusch ähnlicher ist als der Pumpe.
+| Modus | Funktionsweise |
+|---|---|
+| **Mikrofon** | Klang und Rhythmus der Pumpe |
+| **Vibration** | Beschleunigungssensor, 400 Messungen/s; CoreS3 muss fest auf der Maschine stehen |
+| **Mikrofon + Vibration** | beides muss passen – am zuverlässigsten |
 
-Technik: Alle Merkmale stammen aus FFTs – 24 Frequenzbänder (Klangmuster) und die per FFT berechnete
-Autokorrelation der Hüllkurve (Takt und Rhythmus-Form).
+**Mikrofon:** Alle 32 ms wird ein 64-ms-Fenster per FFT ausgewertet:
 
-Welche Variante gilt, entscheidet der Teach automatisch. Ein-/Ausschaltverzögerung entprellen das Signal;
-die Einschaltverzögerung wird vom Timer rückwirkend berücksichtigt, das Ende ist der letzte aktive Frame.
-Alle Schwellen sind auf der Webseite feinjustierbar, die Empfindlichkeit zusätzlich am Display (INFO → EMPF. +/-).
+- **Klangmuster** – 40 Frequenzbänder, verglichen wird die Klangfarbe, nicht die Lautstärke
+  (gut für Rotationspumpen).
+- **Takt und Rhythmus** – Vibrationspumpen schlagen im Netztakt (50 Hz). Dieser Rhythmus bleibt auch unter
+  Druck gleich und unterscheidet sie von netzbrummenden Motoren.
+- **Gleichmäßigkeit** – Niesen, Sprechen und Klappern schwanken stärker als eine Pumpe.
+- Klingt ein Geräusch einer **Mühle** oder einem **Störgeräusch** ähnlicher als der Pumpe, wird es ignoriert.
+  Solange eine Mühle läuft (und kurz danach), startet keine Pumpe.
 
-Der Timer-Start wird auf den Beginn der lauten Phase zurückdatiert (max. 1,5 s), da die Merkmale nach dem
-Einschalten einige Frames brauchen. Unter *Diagnose* auf der Webseite gibt es einen kopierbaren Bericht mit
-Profil, Schwellen und den Messwerten der letzten 10 Erkennungen.
+**Vibration:** Gemessen wird die Vibrationsstärke über einem automatisch nachgeführten Ruhepegel. Kurze Stöße
+(Tasse abstellen) zählen nicht. Die Schwelle lässt sich auf der Webseite anhand eines Live-Balkens einstellen.
+Hinweis: Bei Zweikreisern vibriert auch die Nachfüllpumpe – dann besser *Mikrofon + Vibration*.
 
-Im seriellen Monitor (115200 Baud) werden Teach-Kennwerte sowie jedes Ein-/Ausschalten mit Messwerten ausgegeben.
+Der Timer-Start wird auf den Beginn des Geräuschs zurückdatiert. Als Sicherung stoppt der Timer nach 60 s
+(Standardprofil) bzw. 120 s (eingelernt).
+
+## Waage
+
+Einschalten auf der Webseite (*Waage*) oder am Display (*EINST. → Waage +*). Die Waage wird über Bluetooth
+automatisch gefunden und bei Abbruch neu verbunden. Ausgeschaltet wird Bluetooth gar nicht gestartet.
+
+- **Auto-Tara:** beim Pumpenstart wird tariert (wird wiederholt, falls die Waage den Befehl ignoriert).
+- **Waagen-Timer:** startet/stoppt mit der Pumpe; beim Mahlen wird er auf 0 gesetzt.
+- **Mühlen-Tara:**
+  1. Leeren Siebträger auflegen → *Jetzt wiegen* (Webseite) bzw. *EINST. → Siebträger → WIEGEN*.
+  2. *Mühlen-Tara* einschalten.
+  3. Mahlen: Die leere Waage wird tariert und zeigt −Siebträgergewicht; gefüllten Siebträger auflegen → das
+     Kaffeemehl steht groß im Display. Nachmahlen tariert nicht erneut.
+- **Historie:** Endgewicht je Bezug (inkl. 4 s Nachtropfen), Dosis und Verhältnis.
+
+Die Waagen selbst zeigen das Rohgewicht – den Siebträger zieht der Coffee Timer rechnerisch ab, da die Waagen
+per Bluetooth nur „auf 0 tarieren“ kennen. Der Diagnosebericht zeigt das erkannte Waagenmodell, die gesendeten
+Befehle und das letzte Rohpaket (hilfreich, um weitere Waagen zu unterstützen).
+
+## Profile
+
+- **5 Plätze** – jeder speichert Pumpe, Mühlen, Störgeräusche und Schwellen.
+- Wechseln, umbenennen, löschen, **exportieren** (Sicherung als Datei) und **importieren** auf der Webseite;
+  wechseln auch am Display (*EINST. → Profil*).
+- Profile älterer Firmware-Versionen werden beim Start automatisch ins aktuelle Format übernommen.
+
+## Firmware-Update über WLAN
+
+- **Webseite:** bauen, dann unter *Firmware-Update* die Datei `.pio/build/m5stack-cores3/firmware.bin` hochladen.
+- **PlatformIO:** `pio run -e m5stack-cores3-ota -t upload`. Funktioniert `coffeetimer.local` nicht, die IP
+  angeben: `--upload-port 192.168.x.y` (oder `upload_port` in `platformio.ini` anpassen).
+- Das Update landet im zweiten App-Slot und wird erst nach erfolgreicher Prüfung aktiv. Profile und
+  Einstellungen bleiben erhalten.
+
+## Fehlersuche
+
+- **Diagnose** auf der Webseite: kopierbarer Bericht mit Profil, Schwellen, Waage, Vibration, Mühlen,
+  freiem Speicher und den Messwerten der letzten 10 Erkennungen.
+- Serieller Monitor (115200 Baud): Teach-Kennwerte, jede Erkennung, Waagenbefehle.
+- Übersteuert das Mikrofon, erscheint eine Warnung – dann die Verstärkung (Webseite *Mikrofon*) verringern.
+  Eingelernte Geräusche rechnen eine geänderte Verstärkung automatisch um.
 
 ## Projektstruktur
 
 | Datei | Aufgabe |
 |---|---|
-| `src/config.h` | feste Parameter (Audio, Teach-Grenzwerte, Netzwerk) |
-| `src/audio_features.*` | FFT, Pegel, Bandspektrum |
-| `src/pump_detector.*` | Vergleich mit Profil, Entprellung |
+| `src/main.cpp` | Einstiegspunkt, Modulübersicht |
+| `src/config.h` | feste Parameter (Audio, Teach-Grenzwerte, Netzwerk, Anzeige) |
+| `src/audio_features.*` | FFT, Pegel, Bandspektrum, Rhythmus-Kurve |
+| `src/pump_detector.*` | Vergleich mit Pumpe, Mühlen und Störgeräuschen; Entprellung |
 | `src/teach_mode.*` | Teach-Ablauf und Qualitätsbewertung |
+| `src/vibration.*` | Vibrationserkennung (Beschleunigungssensor) |
 | `src/shot_timer.*` | Timer und Historie |
-| `src/app.*` | Audio-Task, zentrale Logik, Mutex |
+| `src/app.*` | Audio-Task, zentrale Logik, Mühlen-Tara, Mutex |
+| `src/scale.*` | Bluetooth-Waagen (Protokolle, Verbindung, Tara) |
 | `src/ui.*` | Display und Touch |
 | `src/web_server.*`, `src/web_page.h` | Webseite und JSON-API |
+| `src/settings.*` | Speicherung (Profile im LittleFS, kleine Werte im NVS), Format-Umrechnung |
 | `src/net_manager.*` | WLAN, Access-Point, mDNS, NTP |
+| `src/datetime.*` | Uhrzeit und RTC |
 | `src/ota.*` | Firmware-Update über WLAN |
-| `src/battery.*` | Akkustand (Display oben rechts, Webseite) |
-| `src/scale.*` | optionale Felicita-Arc-Waage (Bluetooth LE, NimBLE) |
-| `src/settings.*` | Speicherung im NVS |
+| `src/battery.*` | Akkustand |
 
 ## Lizenz
 
@@ -167,4 +184,5 @@ Das bedeutet kurz:
   vollständigen Quellcode unter derselben Lizenz mitliefern bzw. zugänglich machen.
 - Es gibt keine Gewährleistung.
 
-Verwendete Bibliotheken und deren Lizenzen: siehe [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+Verwendete Bibliotheken und deren Lizenzen sowie die Quellen der Waagen-Protokolle: siehe
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
