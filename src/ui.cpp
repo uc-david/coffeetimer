@@ -326,16 +326,18 @@ void drawMain() {
     canvas.setTextDatum(textdatum_t::bottom_left);
     canvas.drawString("g", kW / 2 - 10 + w / 2 + 6, 145);
   } else {
+    const String secs = formatSeconds(snap.timerMs);
     canvas.setFont(kFontTimer);
     canvas.setTextSize(2);
+    const int w = canvas.textWidth(secs);
     canvas.setTextColor(snap.timerRunning ? kColRun : kColText);
     canvas.setTextDatum(textdatum_t::middle_center);
-    canvas.drawString(formatSeconds(snap.timerMs), kW / 2 - 10, 100);
+    canvas.drawString(secs, kW / 2 - 10, 100);
     canvas.setTextSize(1);
     canvas.setFont(kFontBold);
     canvas.setTextColor(kColMuted);
     canvas.setTextDatum(textdatum_t::bottom_left);
-    canvas.drawString("s", kW / 2 + 128, 145);
+    canvas.drawString("s", kW / 2 - 10 + w / 2 + 6, 145);  // direkt hinter der Zahl, wie beim "g"
   }
 
   // --- Waage (optional) bzw. letzte Bezüge ---------------------------------------
