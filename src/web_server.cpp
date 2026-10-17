@@ -193,14 +193,16 @@ void handleStatus() {
   sc["battery"] = s.scaleBattery;
   sc["name"] = scale::deviceName();
   sc["address"] = scale::deviceAddress();
-  sc["boundAddr"] = scfg.boundAddr;
-  sc["boundName"] = scfg.boundName;
+  // String(...): ArduinoJson kopiert den Text. Ein const char* würde nur als
+  // Zeiger gespeichert und könnte beim Serialisieren schon ungültig sein.
+  sc["boundAddr"] = String(scfg.boundAddr);
+  sc["boundName"] = String(scfg.boundName);
   sc["searching"] = scale::searching();
   JsonArray found = sc["found"].to<JsonArray>();
-  for (const scale::Found& f : scale::found()) {
+  for (const scale::Found& f : scale::found()) {  // temporäre Liste -> Texte kopieren
     JsonObject o = found.add<JsonObject>();
-    o["name"] = f.name;
-    o["addr"] = f.addr;
+    o["name"] = String(f.name);
+    o["addr"] = String(f.addr);
     o["rssi"] = f.rssi;
   }
 
