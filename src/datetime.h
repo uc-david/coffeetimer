@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file datetime.h
  * @brief Uhrzeit und Datum mit der eingebauten RTC (BM8563) des CoreS3.

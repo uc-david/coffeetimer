@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file datetime.cpp
  * @brief Implementierung von Uhrzeit / RTC.

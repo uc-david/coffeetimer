@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file vibration.h
  * @brief Pumpenerkennung über Vibration (Beschleunigungssensor BMI270 des CoreS3).

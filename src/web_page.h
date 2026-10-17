@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file web_page.h
  * @brief Eingebettete Single-Page-Webseite (HTML/CSS/JS in einer Datei).

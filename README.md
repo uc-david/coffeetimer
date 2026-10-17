@@ -151,3 +151,20 @@ Im seriellen Monitor (115200 Baud) werden Teach-Kennwerte sowie jedes Ein-/Aussc
 | `src/battery.*` | Akkustand (Display oben rechts, Webseite) |
 | `src/scale.*` | optionale Felicita-Arc-Waage (Bluetooth LE, NimBLE) |
 | `src/settings.*` | Speicherung im NVS |
+
+## Lizenz
+
+Copyright (C) 2026 uc-david
+
+Dieses Projekt ist freie Software: Du darfst es unter den Bedingungen der
+**GNU General Public License, Version 3 oder (nach deiner Wahl) jeder späteren Version** weitergeben und/oder
+verändern – siehe [LICENSE](LICENSE).
+
+Das bedeutet kurz:
+
+- Nutzen, verändern und weitergeben ist erlaubt – privat wie gewerblich.
+- Wer die Firmware oder eine veränderte Version **weitergibt** (auch vorinstalliert auf einem Gerät), muss den
+  vollständigen Quellcode unter derselben Lizenz mitliefern bzw. zugänglich machen.
+- Es gibt keine Gewährleistung.
+
+Verwendete Bibliotheken und deren Lizenzen: siehe [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

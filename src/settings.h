@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file settings.h
  * @brief Persistente Daten: Profil-Slots, Mikrofon- und WLAN-Einstellungen.

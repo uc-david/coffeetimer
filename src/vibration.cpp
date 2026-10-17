@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file vibration.cpp
  * @brief Implementierung der Vibrationserkennung (BMI270, FIFO, 400 Hz).

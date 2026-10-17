@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file web_server.h
  * @brief HTTP-Server: Webseite und JSON-API parallel zur Bedienung am Display.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file pump_detector.h
  * @brief Erkennt das Ein- und Ausschalten der Pumpe anhand des gelernten Profils.

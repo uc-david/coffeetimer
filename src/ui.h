@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file ui.h
  * @brief Bedienoberfläche auf dem CoreS3-Display (320x240, Touch).

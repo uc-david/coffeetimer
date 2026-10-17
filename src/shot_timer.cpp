@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 uc-david
 /**
  * @file shot_timer.cpp
  * @brief Implementierung von Timer und Historie.
