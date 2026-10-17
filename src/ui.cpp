@@ -554,7 +554,7 @@ void drawResetMenu() {
   drawTile(btnResetAll, "Bezugszeit, Gewicht und Waagen-Zeit");
   drawTile(btnResetTimer, "hier am Display");
   drawTile(btnResetTare, "Waage tarieren");
-  drawTile(btnResetScale, "Timer an der Waage");
+  drawTile(btnResetScale, "Timer Waage");
   drawButton(btnBack);
 }
 
