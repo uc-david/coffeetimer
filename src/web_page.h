@@ -654,7 +654,8 @@ async function loadProfiles() {
         `<td style="white-space:nowrap">` +
         (active ? '' : `<button style="min-width:0;padding:6px 10px" onclick="slotAction('select',${i})">Aktivieren</button> `) +
         `<button style="min-width:0;padding:6px 10px" onclick="renameSlot(${i})">✎</button> ` +
-        `<button style="min-width:0;padding:6px 10px" onclick="location.href='/api/profiles/export?slot=${i}'">⤓</button> ` +
+        `<button style="min-width:0;padding:6px 10px" title="Als Klartext ansehen" onclick="window.open('/api/profiles/text?slot=${i}')">Klartext</button> ` +
+        `<button style="min-width:0;padding:6px 10px" title="Exportieren (Datei)" onclick="location.href='/api/profiles/export?slot=${i}'">⤓</button> ` +
         `<button style="min-width:0;padding:6px 10px" onclick="deleteSlot(${i})">🗑</button></td></tr>`;
     }).join('');
     $('importSlot').innerHTML = p.slots.map((s, i) => `<option value="${i}" ${i === p.active ? 'selected' : ''}>${i + 1}. ${esc(s.name)}</option>`).join('');

@@ -750,20 +750,100 @@ bool App::cmdDeleteSlot(uint8_t slot) {
   return ok;
 }
 
+ProfileSlot& App::slotLocked(uint8_t slot) {
+  ProfileSlot& s = slotBuf();
+  if (slot == activeSlot_) {  // aktiver Slot: aktueller Stand (auch ungespeicherte Einstellungen)
+    memcpy(s.name, slotName_, sizeof(s.name));
+    s.pump = profile_;
+    s.noise = noise_;
+    s.settings = settings_;
+    s.grinders = grinders_;
+  } else {
+    settings::loadSlot(slot, s);
+  }
+  return s;
+}
+
 bool App::exportSlot(uint8_t slot, String& out, String& name) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
-  if (slot == activeSlot_) {
-    memcpy(slotBuf().name, slotName_, sizeof(slotBuf().name));
-    slotBuf().pump = profile_;
-    slotBuf().noise = noise_;
-    slotBuf().settings = settings_;
-    slotBuf().grinders = grinders_;
-  } else {
-    settings::loadSlot(slot, slotBuf());
+  const ProfileSlot& s = slotLocked(slot);
+  name = s.name;
+  return settings::encodeSlot(s, out);
+}
+
+namespace {
+/// Klangmuster als Mini-Diagramm: ein Blockzeichen je Band (-1..1 -> ▁..█).
+String patternBar(const float* t) {
+  static const char* const kBlocks[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
+  String s = "|";
+  for (size_t b = 0; b < cfg::kNumBands; ++b) {
+    const int i = constrain(static_cast<int>((t[b] + 1.0f) * 0.5f * 8.999f), 0, 8);
+    s += kBlocks[i];
   }
-  name = slotBuf().name;
-  return settings::encodeSlot(slotBuf(), out);
+  return s + "|";
+}
+}  // namespace
+
+bool App::slotText(uint8_t slot, String& out) {
+  if (slot >= cfg::kProfileSlots) return false;
+  Lock lock(mutex_);
+  const ProfileSlot& s = slotLocked(slot);
+  char buf[220];
+  auto add = [&](const char* fmt, auto... args) {
+    snprintf(buf, sizeof(buf), fmt, args...);
+    out += buf;
+    out += '\n';
+  };
+  auto patterns = [&](const float (*t)[cfg::kNumBands], size_t n) {
+    for (size_t i = 0; i < n; ++i) out += "  " + String(i + 1) + ": " + patternBar(t[i]) + "\n";
+  };
+  auto sound = [&](const char* title, const NoiseProfile::Entry& e) {
+    add("%s: %u Klangmuster, eigener Hintergrund %.1f dBFS, Pegel %.1f dBFS (Abstand %.1f dB), "
+        "Schwelle %.2f, Mikrofon-Verstärkung %.0f", title, e.templateCount, e.bgRmsDb, e.levelDb,
+        e.levelDb - e.bgRmsDb, e.simThreshold, e.micGain);
+    patterns(e.templates, e.templateCount);
+  };
+
+  out = "";
+  add("Profil %u: %s%s", slot + 1, s.name, slot == activeSlot_ ? "  (aktiv)" : "");
+  add("Firmware %s", cfg::kFirmwareVersion);
+
+  const PumpProfile& p = s.pump;
+  add("\n== Pumpe ==");
+  if (p.isDefault()) {
+    add("Standardprofil (noch kein Teach) – erkannt wird jedes gleichmäßige Geräusch über dem Raumpegel.");
+  } else {
+    add("Aufnahmen %u, Klangmuster %u, Qualität %.0f/100, Mikrofon-Verstärkung %.0f", p.recordings,
+        p.templateCount, p.quality, p.micGain);
+    add("Hintergrund %.1f dBFS, Pumpe (leiser Teil) %.1f dBFS, Abstand %.1f dB", p.bgRmsDb, p.pumpRmsDb,
+        p.pumpRmsDb - p.bgRmsDb);
+    if (p.periodic) {
+      add("Takt: %.1f Hz (Vibrationspumpe), Rhythmus-Schwelle %.2f", p.periodHz(), p.rhythmThreshold);
+    } else {
+      add("Takt: keiner (z. B. Rotationspumpe) – erkannt über die Klangmuster");
+    }
+    add("Max. Pegelschwankung %.1f dB", p.steadyThreshold);
+    add("Klangmuster (40 Bänder, 80 Hz links -> 7 kHz rechts; hoch = relativ stärker):");
+    patterns(p.templates, p.templateCount);
+  }
+
+  const DetectorSettings& st = s.settings;
+  add("\n== Einstellungen ==");
+  add("Muster-Schwelle %.2f, Takt-Schwelle %.2f, Pegel-Schwelle %.2f", st.similarityThreshold,
+      st.periodicityThreshold, st.levelThreshold);
+  add("Einschaltverzögerung %u ms, Ausschaltverzögerung %u ms, Mindestdauer %.0f s", st.onDelayMs,
+      st.offDelayMs, st.minShotSeconds);
+
+  add("\n== Mühlen: %u ==", s.grinders.count);
+  for (uint8_t i = 0; i < s.grinders.count; ++i) {
+    sound((String("\"") + s.grinders.names[i] + "\"").c_str(), s.grinders.entries[i]);
+  }
+  add("\n== Störgeräusche: %u ==", s.noise.count);
+  for (uint8_t i = 0; i < s.noise.count; ++i) {
+    sound(("Störgeräusch " + String(i + 1)).c_str(), s.noise.entries[i]);
+  }
+  return true;
 }
 
 bool App::cmdImportSlot(uint8_t slot, const String& data) {

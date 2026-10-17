@@ -176,6 +176,8 @@ class App {
   bool cmdDeleteSlot(uint8_t slot);
   /// Export als Text (Base64) bzw. Import aus Text in einen Slot.
   bool exportSlot(uint8_t slot, String& out, String& name);
+  /// Lesbare Beschreibung eines Slots (Pumpe, Mühlen, Störgeräusche, Schwellen).
+  bool slotText(uint8_t slot, String& out);
   bool cmdImportSlot(uint8_t slot, const String& data);
 
   /// Setzt die Mikrofon-Verstärkung (wird im Audio-Task übernommen).
@@ -207,6 +209,7 @@ class App {
   bool persistLocked();             ///< speichert den aktiven Slot
   void refreshSummariesLocked();
   void summarize(const ProfileSlot& s, bool stored, SlotSummary& out);
+  ProfileSlot& slotLocked(uint8_t slot);  ///< aktueller Stand eines Slots in slotBuf (unter Mutex)
 
   SemaphoreHandle_t mutex_ = nullptr;
   FeatureExtractor extractor_;

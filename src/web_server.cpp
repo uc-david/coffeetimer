@@ -391,6 +391,12 @@ void begin() {
   // Profil-Slots
   server.on("/api/profiles", HTTP_GET, handleProfiles);
   server.on("/api/profiles/export", HTTP_GET, handleProfileExport);
+  // Klartext eines Profils (zum Ansehen im Browser)
+  server.on("/api/profiles/text", HTTP_GET, [] {
+    String text;
+    if (!app.slotText(server.arg("slot").toInt(), text)) return sendOk(false, "Ungültiger Profil-Platz");
+    server.send(200, "text/plain; charset=utf-8", text);
+  });
   server.on("/api/profiles/select", HTTP_POST, [] {
     JsonDocument in;
     const int slot = slotFromBody(in);
