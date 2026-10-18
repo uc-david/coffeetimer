@@ -149,10 +149,11 @@ class App {
    * Übernimmt das Teach-Ergebnis (Pumpe: Profil, Störgeräusch: Liste ergänzen).
    * @param add   Pumpe: false = Profil ersetzen, true = bestehendes Profil ergänzen;
    *              Mühle: false = neue Mühle, true = der ähnlichsten Mühle hinzufügen
-   * @param note  optional: erhält einen Hinweistext
+   * @param note  optional: erhält einen Hinweistext (bei der Pumpe inkl. geänderter Schwellen)
+   * @param keepSettings  Pumpe: bisherige Schwellen behalten statt aus der Aufnahme setzen
    * @return false bei Fehler-Ergebnis
    */
-  bool cmdSaveTeach(bool add, String* note = nullptr);
+  bool cmdSaveTeach(bool add, String* note = nullptr, bool keepSettings = false);
   /// Erstellt einen Diagnosebericht (Klartext) zum Kopieren/Weitergeben.
   void diagnosticsText(String& out);
 
@@ -175,10 +176,18 @@ class App {
   /// Löscht einen Slot (danach Standardprofil).
   bool cmdDeleteSlot(uint8_t slot);
   /// Export als Text (Base64) bzw. Import aus Text in einen Slot.
-  bool exportSlot(uint8_t slot, String& out, String& name);
+  /// Export: jeder Teil (Pumpe+Einstellungen, Mühlen, Störgeräusche) einzeln als Text.
+  bool exportSlot(uint8_t slot, String& name, String& pump, String& grinders, String& noise);
   /// Lesbare Beschreibung eines Slots (Pumpe, Mühlen, Störgeräusche, Schwellen).
   bool slotText(uint8_t slot, String& out);
-  bool cmdImportSlot(uint8_t slot, const String& data);
+  /**
+   * Import ausgewählter Teile in einen Slot. Nicht ausgewählte Teile des
+   * Ziel-Slots bleiben unverändert (ihre Dateien werden nicht geschrieben).
+   * @param parts   settings::Part-Bits
+   * @param legacy  Export älterer Firmware (alle Teile in einem Block) oder leer
+   */
+  bool cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const String& grinders,
+                     const String& noise, const String& legacy);
 
   /// Setzt die Mikrofon-Verstärkung (wird im Audio-Task übernommen).
   void cmdSetMicGain(uint8_t gain);
@@ -209,7 +218,8 @@ class App {
 
   // Slots (Aufruf nur unter Mutex)
   void loadSlotLocked(uint8_t slot);
-  bool persistLocked();             ///< speichert den aktiven Slot
+  /// Speichert Teile des aktiven Slots (settings::Part, je eine Datei).
+  bool persistLocked(uint8_t parts);
   void refreshSummariesLocked();
   void summarize(const ProfileSlot& s, bool stored, SlotSummary& out);
   ProfileSlot& slotLocked(uint8_t slot);  ///< aktueller Stand eines Slots in slotBuf (unter Mutex)

@@ -320,25 +320,128 @@ bool adoptMarkedGrinder(uint8_t slot, ProfileSlot& s) {
   return true;
 }
 
-String slotPath(uint8_t slot) {
-  return "/slot" + String(slot + 1) + ".bin";
+// ---------------------------------------------------------------------------
+// Dateien eines Slots: je Teil eine eigene Datei (Pumpe / Störgeräusche /
+// Mühlen). Gespeichert wird nur der geänderte Teil – die anderen Dateien
+// werden dabei nicht angefasst.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kPartVersion = 1;
+constexpr uint32_t kPumpMagic = 0x50544350;   // "PCTP"
+constexpr uint32_t kNoiseMagic = 0x4E544350;  // "PCTN"
+constexpr uint32_t kGrindMagic = 0x47544350;  // "PCTG"
+
+/// Kopf jeder Teil-Datei: Kennung, Version und Nutzdatengröße (prüft Format).
+struct PartHeader {
+  uint32_t magic;
+  uint32_t version;
+  uint32_t size;
+};
+
+/// Ein Datenblock einer Teil-Datei (Zeiger + Größe).
+struct Chunk {
+  void* data;
+  size_t size;
+};
+
+/**
+ * Aufbau eines Teils – EINE Stelle für Speichern, Laden, Export und Import.
+ * @return Anzahl der Blöcke in chunks (0 = unbekannter Teil)
+ */
+size_t partLayout(ProfileSlot& s, uint8_t part, Chunk (&chunks)[3], uint32_t& magic) {
+  switch (part) {
+    case settings::kPartPump:
+      magic = kPumpMagic;
+      chunks[0] = {s.name, sizeof(s.name)};
+      chunks[1] = {&s.pump, sizeof(s.pump)};
+      chunks[2] = {&s.settings, sizeof(s.settings)};
+      return 3;
+    case settings::kPartNoise:
+      magic = kNoiseMagic;
+      chunks[0] = {&s.noise, sizeof(s.noise)};
+      return 1;
+    case settings::kPartGrinders:
+      magic = kGrindMagic;
+      chunks[0] = {&s.grinders, sizeof(s.grinders)};
+      return 1;
+  }
+  return 0;
+}
+
+String slotBase(uint8_t slot) { return "/slot" + String(slot + 1); }
+/// Alte Gesamtdatei (bis Firmware mit Format v8) bzw. deren Sicherung.
+String legacyPath(uint8_t slot) { return slotBase(slot) + ".bin"; }
+String legacyBackupPath(uint8_t slot) { return slotBase(slot) + "_old.bin"; }
+
+String partPath(uint8_t slot, uint8_t part) {
+  switch (part) {
+    case settings::kPartPump:     return slotBase(slot) + "_pump.bin";
+    case settings::kPartNoise:    return slotBase(slot) + "_noise.bin";
+    case settings::kPartGrinders: return slotBase(slot) + "_grinder.bin";
+  }
+  return "";
 }
 
 /**
- * Speichern läuft über eine temporäre Datei. Wurde es unterbrochen, bevor die
+ * Schreibt eine Teil-Datei: erst vollständig als .tmp, dann über die alte
+ * umbenennen (LittleFS ersetzt atomar). Bei Stromausfall bleibt immer eine
+ * vollständige Datei übrig (siehe recoverTempFiles).
+ */
+bool writePart(const String& path, uint32_t magic, const Chunk* chunks, size_t n) {
+  PartHeader h{magic, kPartVersion, 0};
+  for (size_t i = 0; i < n; ++i) h.size += chunks[i].size;
+  const String tmp = path + ".tmp";
+  File f = LittleFS.open(tmp, "w");
+  if (!f) return false;
+  size_t written = f.write(reinterpret_cast<const uint8_t*>(&h), sizeof(h));
+  for (size_t i = 0; i < n; ++i) written += f.write(static_cast<const uint8_t*>(chunks[i].data), chunks[i].size);
+  f.close();
+  if (written != sizeof(h) + h.size) {
+    LittleFS.remove(tmp);
+    Serial.printf("[settings] FEHLER beim Schreiben von %s\n", path.c_str());
+    return false;
+  }
+  if (LittleFS.rename(tmp, path)) return true;
+  // Falls das Dateisystem das Überschreiben ablehnt: alte Datei weg, dann umbenennen
+  LittleFS.remove(path);
+  return LittleFS.rename(tmp, path);
+}
+
+/// Liest eine Teil-Datei. false = fehlt oder falsches Format (Daten dann unbrauchbar).
+bool readPart(const String& path, uint32_t magic, const Chunk* chunks, size_t n) {
+  if (!LittleFS.exists(path)) return false;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  PartHeader h{};
+  size_t expected = 0;
+  for (size_t i = 0; i < n; ++i) expected += chunks[i].size;
+  bool ok = f.read(reinterpret_cast<uint8_t*>(&h), sizeof(h)) == sizeof(h) && h.magic == magic &&
+            h.version == kPartVersion && h.size == expected;
+  for (size_t i = 0; ok && i < n; ++i) {
+    ok = f.read(static_cast<uint8_t*>(chunks[i].data), chunks[i].size) == chunks[i].size;
+  }
+  f.close();
+  if (!ok) Serial.printf("[settings] %s ungültig (Größe/Version)\n", path.c_str());
+  return ok;
+}
+
+/**
+ * Speichern läuft über temporäre Dateien. Wurde es unterbrochen, bevor die
  * fertige .tmp-Datei an ihren Platz kam, wird das hier nachgeholt. Existiert
  * die eigentliche Datei noch, ist die .tmp evtl. unvollständig -> verwerfen.
  */
 void recoverTempFiles() {
   for (uint8_t slot = 0; slot < cfg::kProfileSlots; ++slot) {
-    const String path = slotPath(slot);
-    const String tmp = path + ".tmp";
-    if (!LittleFS.exists(tmp)) continue;
-    if (LittleFS.exists(path)) {
-      LittleFS.remove(tmp);
-    } else if (LittleFS.rename(tmp, path)) {
-      Serial.printf("[settings] Slot %u aus temporärer Datei wiederhergestellt\n", slot + 1);
+    for (uint8_t part : {settings::kPartPump, settings::kPartNoise, settings::kPartGrinders}) {
+      const String path = partPath(slot, part);
+      const String tmp = path + ".tmp";
+      if (!LittleFS.exists(tmp)) continue;
+      if (LittleFS.exists(path)) {
+        LittleFS.remove(tmp);
+      } else if (LittleFS.rename(tmp, path)) {
+        Serial.printf("[settings] %s aus temporärer Datei wiederhergestellt\n", path.c_str());
+      }
     }
+    LittleFS.remove(legacyPath(slot) + ".tmp");  // Rest des alten Formats
   }
 }
 
@@ -430,61 +533,80 @@ void defaultSlot(uint8_t slot, ProfileSlot& out) {
 }
 
 bool slotExists(uint8_t slot) {
-  return fsOk && slot < cfg::kProfileSlots && LittleFS.exists(slotPath(slot));
+  return fsOk && slot < cfg::kProfileSlots &&
+         (LittleFS.exists(partPath(slot, kPartPump)) || LittleFS.exists(legacyPath(slot)));
 }
 
 bool loadSlot(uint8_t slot, ProfileSlot& out) {
   defaultSlot(slot, out);
   if (!slotExists(slot)) return false;
-  File f = LittleFS.open(slotPath(slot), "r");
+
+  // Aktuelles Format: drei Dateien. Fehlt bzw. defekt eine Mühlen- oder
+  // Störgeräusch-Datei, ist dieser Teil leer – der Rest bleibt nutzbar.
+  if (LittleFS.exists(partPath(slot, kPartPump))) {
+    Chunk c[3];
+    uint32_t magic;
+    size_t n = partLayout(out, kPartPump, c, magic);
+    if (!readPart(partPath(slot, kPartPump), magic, c, n)) {
+      defaultSlot(slot, out);
+      return false;
+    }
+    n = partLayout(out, kPartNoise, c, magic);
+    if (!readPart(partPath(slot, kPartNoise), magic, c, n)) resetInPlace(out.noise);
+    n = partLayout(out, kPartGrinders, c, magic);
+    if (!readPart(partPath(slot, kPartGrinders), magic, c, n)) resetInPlace(out.grinders);
+    sanitize(out);
+    return true;
+  }
+
+  // Älteres Format: eine Gesamtdatei -> umrechnen, in drei Dateien aufteilen,
+  // die alte Datei als Sicherung umbenennen.
+  File f = LittleFS.open(legacyPath(slot), "r");
   if (!f) return false;
   const size_t n = f.read(reinterpret_cast<uint8_t*>(fileBuf), sizeof(SlotFile));
   f.close();
   bool migrated;
   if (!decodeAny(reinterpret_cast<const uint8_t*>(fileBuf), n, out, migrated)) {
     Serial.printf("[settings] Slot %u ungültig (Größe/Version)\n", slot + 1);
+    defaultSlot(slot, out);
     return false;
   }
-  if (adoptMarkedGrinder(slot, out)) migrated = true;
+  adoptMarkedGrinder(slot, out);
   sanitize(out);
-  // Älteres Format: gleich im aktuellen Format speichern.
-  if (migrated) {
-    Serial.printf("[settings] Slot %u ins aktuelle Format übernommen\n", slot + 1);
-    saveSlot(slot, out);
+  if (saveSlot(slot, out, kPartAll)) {
+    LittleFS.remove(legacyBackupPath(slot));
+    LittleFS.rename(legacyPath(slot), legacyBackupPath(slot));
+    Serial.printf("[settings] Slot %u in getrennte Dateien aufgeteilt (Sicherung: %s)\n", slot + 1,
+                  legacyBackupPath(slot).c_str());
   }
   return true;
 }
 
-bool saveSlot(uint8_t slot, const ProfileSlot& in) {
+bool saveSlot(uint8_t slot, const ProfileSlot& in, uint8_t parts) {
   if (!fsOk || slot >= cfg::kProfileSlots) return false;
-  fileBuf->magic = kSlotMagic;
-  fileBuf->version = kSlotVersion;
-  fileBuf->slot = in;
-
-  // Erst vollständig in eine temporäre Datei schreiben, dann über die alte
-  // umbenennen (LittleFS ersetzt dabei atomar): Bei Stromausfall bleibt immer
-  // eine vollständige Datei übrig (siehe recoverTempFiles).
-  const String path = slotPath(slot);
-  const String tmp = path + ".tmp";
-  File f = LittleFS.open(tmp, "w");
-  if (!f) return false;
-  const size_t n = f.write(reinterpret_cast<const uint8_t*>(fileBuf), sizeof(SlotFile));
-  f.close();
-  if (n != sizeof(SlotFile)) {
-    LittleFS.remove(tmp);
-    Serial.printf("[settings] FEHLER beim Schreiben von Slot %u\n", slot + 1);
-    return false;
+  // Die Pumpen-Datei kennzeichnet einen belegten Slot: beim ersten Speichern
+  // (z. B. zuerst eine Mühle eingelernt) immer mitschreiben.
+  if (!LittleFS.exists(partPath(slot, kPartPump))) parts |= kPartPump;
+  bool ok = true;
+  ProfileSlot& src = const_cast<ProfileSlot&>(in);  // nur gelesen
+  for (uint8_t part : {kPartPump, kPartNoise, kPartGrinders}) {
+    if (!(parts & part)) continue;
+    Chunk c[3];
+    uint32_t magic;
+    const size_t n = partLayout(src, part, c, magic);
+    ok = writePart(partPath(slot, part), magic, c, n) && ok;
   }
-  if (LittleFS.rename(tmp, path)) return true;
-  // Falls das Dateisystem das Überschreiben ablehnt: alte Datei weg, dann
-  // umbenennen (die fertige .tmp wird notfalls beim Start übernommen).
-  LittleFS.remove(path);
-  return LittleFS.rename(tmp, path);
+  return ok;
 }
 
 bool deleteSlot(uint8_t slot) {
-  if (!slotExists(slot)) return true;
-  return LittleFS.remove(slotPath(slot));
+  if (!fsOk || slot >= cfg::kProfileSlots) return false;
+  bool ok = true;
+  for (const String& p : {partPath(slot, kPartPump), partPath(slot, kPartNoise),
+                          partPath(slot, kPartGrinders), legacyPath(slot), legacyBackupPath(slot)}) {
+    if (LittleFS.exists(p)) ok = LittleFS.remove(p) && ok;
+  }
+  return ok;
 }
 
 bool encodeSlot(const ProfileSlot& in, String& out) {
@@ -511,6 +633,57 @@ bool decodeSlot(const String& in, ProfileSlot& out) {
                                        reinterpret_cast<const uint8_t*>(in.c_str()), in.length());
   bool migrated;  // Exporte älterer Firmware werden umgerechnet
   if (rc != 0 || !decodeAny(reinterpret_cast<const uint8_t*>(fileBuf), len, out, migrated)) return false;
+  sanitize(out);
+  return true;
+}
+
+bool encodePart(const ProfileSlot& in, uint8_t part, String& out) {
+  Chunk c[3];
+  uint32_t magic;
+  const size_t n = partLayout(const_cast<ProfileSlot&>(in), part, c, magic);
+  if (!n) return false;
+  // Kopf + Daten wie in der Datei in den (PSRAM-)Puffer, dann Base64
+  uint8_t* buf = reinterpret_cast<uint8_t*>(fileBuf);
+  PartHeader h{magic, kPartVersion, 0};
+  for (size_t i = 0; i < n; ++i) h.size += c[i].size;
+  if (sizeof(h) + h.size > sizeof(SlotFile)) return false;
+  memcpy(buf, &h, sizeof(h));
+  size_t pos = sizeof(h);
+  for (size_t i = 0; i < n; ++i) {
+    memcpy(buf + pos, c[i].data, c[i].size);
+    pos += c[i].size;
+  }
+  size_t len = 0;
+  mbedtls_base64_encode(nullptr, 0, &len, buf, pos);
+  std::unique_ptr<uint8_t[]> text(new uint8_t[len + 1]);
+  if (mbedtls_base64_encode(text.get(), len + 1, &len, buf, pos) != 0) return false;
+  text[len] = '\0';
+  out = reinterpret_cast<char*>(text.get());
+  return true;
+}
+
+bool decodePart(const String& in, uint8_t part, ProfileSlot& out) {
+  Chunk c[3];
+  uint32_t magic;
+  const size_t n = partLayout(out, part, c, magic);
+  if (!n) return false;
+  uint8_t* buf = reinterpret_cast<uint8_t*>(fileBuf);
+  size_t len = 0;
+  if (mbedtls_base64_decode(buf, sizeof(SlotFile), &len, reinterpret_cast<const uint8_t*>(in.c_str()),
+                            in.length()) != 0) {
+    return false;
+  }
+  PartHeader h;
+  size_t expected = 0;
+  for (size_t i = 0; i < n; ++i) expected += c[i].size;
+  if (len != sizeof(h) + expected) return false;
+  memcpy(&h, buf, sizeof(h));
+  if (h.magic != magic || h.version != kPartVersion || h.size != expected) return false;
+  size_t pos = sizeof(h);
+  for (size_t i = 0; i < n; ++i) {
+    memcpy(c[i].data, buf + pos, c[i].size);
+    pos += c[i].size;
+  }
   sanitize(out);
   return true;
 }

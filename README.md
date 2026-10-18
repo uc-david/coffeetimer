@@ -133,7 +133,12 @@ Befehle und das letzte Rohpaket (hilfreich, um weitere Waagen zu unterstützen).
 - **5 Plätze** – jeder speichert Pumpe, Mühlen, Störgeräusche und Schwellen.
 - Wechseln, umbenennen, löschen, **exportieren** (Sicherung als Datei) und **importieren** auf der Webseite;
   wechseln auch am Display (*EINST. → Profil*).
-- Profile älterer Firmware-Versionen werden beim Start automatisch ins aktuelle Format übernommen.
+- Gespeichert wird je Profil in **drei getrennten Dateien** (Pumpe + Einstellungen, Mühlen, Störgeräusche).
+  Jede Änderung schreibt nur ihre eigene Datei – ein Pumpen-Teach kann z. B. die Mühlen nicht verändern.
+- Der **Export** enthält die drei Teile einzeln; beim **Import** wird per Häkchen gewählt, welche Teile ersetzt
+  werden (z. B. nur die Mühlen aus einem anderen Profil). Exporte älterer Firmware lassen sich weiterhin importieren.
+- Profile älterer Firmware-Versionen werden beim Start automatisch ins aktuelle Format übernommen
+  (die alte Datei bleibt als `/slotN_old.bin` auf dem Gerät).
 
 ## Firmware-Update über WLAN
 

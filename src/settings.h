@@ -153,8 +153,17 @@ void defaultSlot(uint8_t slot, ProfileSlot& out);
 /// Lädt einen Slot. false = leer/ungültig (out enthält dann das Standardprofil).
 bool loadSlot(uint8_t slot, ProfileSlot& out);
 
-/// Speichert einen Slot. false = Schreibfehler (wird geprüft, nicht nur versucht).
-bool saveSlot(uint8_t slot, const ProfileSlot& in);
+/// Teile eines Slots – jeder liegt in einer eigenen Datei.
+enum Part : uint8_t {
+  kPartPump = 1,      ///< /slotN_pump.bin: Name, Pumpe, Einstellungen
+  kPartNoise = 2,     ///< /slotN_noise.bin: Störgeräusche
+  kPartGrinders = 4,  ///< /slotN_grinder.bin: Mühlen
+  kPartAll = 7,
+};
+
+/// Speichert die angegebenen Teile eines Slots (nur deren Dateien werden
+/// geschrieben). false = Schreibfehler (wird geprüft, nicht nur versucht).
+bool saveSlot(uint8_t slot, const ProfileSlot& in, uint8_t parts = kPartAll);
 
 /// Löscht einen Slot (danach wieder Standardprofil).
 bool deleteSlot(uint8_t slot);
@@ -165,6 +174,12 @@ bool slotExists(uint8_t slot);
 /// Slot als Text (Base64) für Export / Import über die Webseite.
 bool encodeSlot(const ProfileSlot& in, String& out);
 bool decodeSlot(const String& in, ProfileSlot& out);
+
+/// Ein Teil eines Slots (kPartPump / kPartNoise / kPartGrinders) als Text
+/// (Base64, gleicher Aufbau wie die Datei) bzw. zurück. decodePart schreibt
+/// nur den angegebenen Teil von out.
+bool encodePart(const ProfileSlot& in, uint8_t part, String& out);
+bool decodePart(const String& in, uint8_t part, ProfileSlot& out);
 
 uint8_t loadActiveSlot();
 void saveActiveSlot(uint8_t slot);

@@ -739,6 +739,14 @@ void TeachController::analyzePump() {
                  r.pumpSteadiness, p.steadyThreshold);
     r.addMessage("%u Klangmuster aus %.1f s Pumpenlauf gelernt.", (unsigned)p.templateCount,
                  r.activeSeconds);
+    // "Ergänzen" hängt die Muster an – passt nicht alles, fallen die ältesten weg.
+    const PumpProfile& cur = currentProfile_;
+    const size_t total = cur.templateCount + p.templateCount;
+    if (cur.valid && !cur.isDefault() && total > cfg::kMaxTemplates) {
+      r.addMessage("Hinweis zu „Ergänzen“: Platz für %u Klangmuster – bis zu %u der bisherigen (die ältesten) "
+                   "würden ersetzt. „Ersetzen“ betrifft das nicht.",
+                   (unsigned)cfg::kMaxTemplates, (unsigned)(total - cfg::kMaxTemplates));
+    }
   }
   if (r.suggestedOffDelayMs > settings_.offDelayMs) {
     r.addMessage("Pause von %.1f s erkannt (Pre-Infusion?) – Ausschaltverzögerung wird auf "
@@ -951,7 +959,23 @@ void TeachController::analyzeNoise() {
     if (r.grinderMatch >= 0) {
       r.addMessage("Am ähnlichsten: %s (%.0f %%) – „Ergänzen“, wenn es dieselbe Mühle ist, sonst als "
                    "neue Mühle speichern.", grinders_->names[r.grinderMatch], r.grinderMatchSim * 100.0f);
+      const size_t total = grinders_->entries[r.grinderMatch].templateCount + e.templateCount;
+      if (total > cfg::kNoiseTemplates) {
+        r.addMessage("Hinweis zu „Ergänzen“: %s hat Platz für %u Klangmuster – bis zu %u der bisherigen "
+                     "(die ältesten) würden ersetzt.", grinders_->names[r.grinderMatch],
+                     (unsigned)cfg::kNoiseTemplates, (unsigned)(total - cfg::kNoiseTemplates));
+      }
     }
+  }
+  // Liste voll: Beim Speichern fällt das älteste Störgeräusch weg – vorher sagen.
+  if (!grinder && currentNoise_.count >= cfg::kMaxNoises) {
+    warning = true;
+    r.addMessage("Liste voll (%u Störgeräusche): Beim Speichern wird Störgeräusch 1 (das älteste) gelöscht. "
+                 "Ggf. vorher ein anderes löschen.", (unsigned)cfg::kMaxNoises);
+  }
+  if (grinder && grinders_ && grinders_->count >= cfg::kMaxGrinders) {
+    r.addMessage("Mühlen-Liste voll (%u): Die Aufnahme kann nur einer vorhandenen Mühle hinzugefügt werden.",
+                 (unsigned)cfg::kMaxGrinders);
   }
   r.addMessage("%.1f s aufgenommen, %u Klangmuster.", r.activeSeconds, (unsigned)e.templateCount);
 

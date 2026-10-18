@@ -135,6 +135,8 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     </div>
     <div id="teachResult"></div>
     <p class="hint" id="teachHint" style="text-align:left"></p>
+    <div class="field hidden" id="keepThField"><label><span><input type="checkbox" id="keepTh">
+      Bisherige Schwellen beibehalten (sonst passend zur Aufnahme gesetzt)</span></label></div>
     <div class="row">
       <button class="primary hidden" id="finishBtn" onclick="post('/api/teach/finish')">Fertig</button>
       <button class="primary hidden" id="saveBtn" onclick="saveTeach('replace')">Profil speichern</button>
@@ -160,8 +162,16 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     <div class="field">
       <label>Profil-Datei importieren in Platz
         <select id="importSlot" style="background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px"></select></label>
-      <input type="file" id="importFile" accept=".json" style="width:100%;color:var(--muted)">
-      <div class="row" style="margin-top:6px"><button onclick="importProfile()">Importieren</button></div>
+      <input type="file" id="importFile" accept=".json" style="width:100%;color:var(--muted)" onchange="readImportFile()">
+      <div id="importParts" class="hidden" style="margin-top:8px">
+        <small style="color:var(--muted)" id="importInfo"></small>
+        <div class="field"><label><span><input type="checkbox" id="impPump"> Pumpe + Einstellungen + Profilname</span></label></div>
+        <div class="field"><label><span><input type="checkbox" id="impGrinders"> Mühlen</span></label></div>
+        <div class="field"><label><span><input type="checkbox" id="impNoise"> Störgeräusche</span></label></div>
+        <small style="color:var(--muted)">Nur die angehakten Teile werden im gewählten Platz ersetzt – alles andere bleibt
+          unverändert.</small>
+        <div class="row" style="margin-top:6px"><button class="primary" onclick="importProfile()">Importieren</button></div>
+      </div>
     </div>
   </section>
 
@@ -577,6 +587,7 @@ function renderTeach(t) {
     ? 'Ergänzen: z. B. erst Leerbezug, dann echten Bezug einlernen – beide werden erkannt.'
     : grinderAdd ? 'Dieselbe Mühle (z. B. anderer Mahlgrad, leer gelaufen)? Dann hinzufügen – sonst als neue Mühle speichern.'
     : '';
+  $('keepThField').classList.toggle('hidden', !(usable && t.mode === 'pump' && profileValid && !profileDefault));
   $('retryBtn').classList.toggle('hidden', !done);
   $('cancelBtn').textContent = done ? 'Verwerfen' : 'Abbrechen';
 }
@@ -685,20 +696,45 @@ function renameSlot(i) {
 function deleteSlot(i) {
   if (confirm('Profil ' + (i + 1) + ' löschen? Der Platz nutzt danach das Standardprofil.')) slotAction('delete', i);
 }
-function importProfile() {
+let pendingImport = null;  // gelesene Profil-Datei
+/** Datei lesen und anzeigen, welche Teile sie enthält. */
+function readImportFile() {
   const f = $('importFile').files[0];
-  if (!f) { toast('Bitte eine Profil-Datei (.json) wählen'); return; }
-  const slot = parseInt($('importSlot').value);
+  pendingImport = null;
+  $('importParts').classList.add('hidden');
+  if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
       const j = JSON.parse(reader.result);
       if (j.format !== 'coffeetimer-profile') throw 'Format';
-      if (!confirm(`"${j.name}" in Platz ${slot + 1} importieren? Der bisherige Inhalt wird überschrieben.`)) return;
-      slotAction('import', slot, { data: j.data });
+      // Version 2: Teile einzeln; ältere Exporte: alles in "data"
+      const has = j.data ? { pump: true, grinders: true, noise: true }
+                         : { pump: !!j.pump, grinders: !!j.grinders, noise: !!j.noise };
+      pendingImport = j;
+      for (const [id, key] of [['impPump', 'pump'], ['impGrinders', 'grinders'], ['impNoise', 'noise']]) {
+        $(id).checked = has[key];
+        $(id).disabled = !has[key];
+      }
+      $('importInfo').textContent = `„${j.name}“ (${j.data ? 'älteres Format' : 'Teile einzeln'}) – was soll übernommen werden?`;
+      $('importParts').classList.remove('hidden');
     } catch (e) { toast('Keine gültige Profil-Datei'); }
   };
   reader.readAsText(f);
+}
+function importProfile() {
+  const j = pendingImport;
+  if (!j) { toast('Bitte eine Profil-Datei (.json) wählen'); return; }
+  const slot = parseInt($('importSlot').value);
+  const parts = [['impPump', 'pump'], ['impGrinders', 'grinders'], ['impNoise', 'noise']]
+    .filter(([id]) => $(id).checked).map(([, key]) => key);
+  if (!parts.length) { toast('Nichts ausgewählt'); return; }
+  const names = { pump: 'Pumpe', grinders: 'Mühlen', noise: 'Störgeräusche' };
+  if (!confirm(`In Platz ${slot + 1} ersetzen: ${parts.map(p => names[p]).join(', ')}?\nAlles andere bleibt unverändert.`)) return;
+  slotAction('import', slot, { parts, pump: j.pump, grinders: j.grinders, noise: j.noise, data: j.data });
+  $('importParts').classList.add('hidden');
+  $('importFile').value = '';
+  pendingImport = null;
 }
 
 // --- Mikrofon --------------------------------------------------------------
@@ -750,8 +786,8 @@ function saveVib() {
 function saveMic() { post('/api/mic', { gain: parseInt($('micGain').value) }); }
 
 function saveTeach(mode) {
-  // Schwellen werden beim Speichern automatisch angepasst -> Formular neu laden
-  post('/api/teach/save', { mode }).then(() => { settingsLoaded = false; });
+  // Schwellen werden beim Speichern ggf. angepasst -> Formular neu laden
+  post('/api/teach/save', { mode, keepSettings: $('keepTh').checked }).then(() => { settingsLoaded = false; });
 }
 async function loadDiag() {
   try { $('diagText').value = await (await fetch('/api/diag', { cache: 'no-store' })).text(); }

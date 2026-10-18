@@ -61,7 +61,7 @@ void App::loop() {
 
 void App::flushSettings() {
   Lock lock(mutex_);
-  if (settingsDirty_) persistLocked();  // setzt settingsDirty_ zurück
+  if (settingsDirty_) persistLocked(settings::kPartPump);  // setzt settingsDirty_ zurück
 }
 
 void App::audioTaskEntry(void* arg) {
@@ -454,7 +454,7 @@ void App::cmdFinishTeach() {
   teach_.finish();
 }
 
-bool App::cmdSaveTeach(bool add, String* note) {
+bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
   Lock lock(mutex_);
   if (teach_.phase() != TeachPhase::Done || teach_.result().quality == TeachQuality::Error) {
     return false;
@@ -498,7 +498,7 @@ bool App::cmdSaveTeach(bool add, String* note) {
     }
     detector_.reset();
     teach_.cancel();
-    if (!persistLocked()) msg = "FEHLER: Mühle konnte nicht gespeichert werden!";
+    if (!persistLocked(settings::kPartGrinders)) msg = "FEHLER: Mühle konnte nicht gespeichert werden!";
     Serial.printf("[teach] %s\n", msg.c_str());
     if (note) *note = msg;
     return true;
@@ -515,7 +515,7 @@ bool App::cmdSaveTeach(bool add, String* note) {
     detector_.setNoise(noise_);
     detector_.reset();
     teach_.cancel();
-    const bool ok = persistLocked();
+    const bool ok = persistLocked(settings::kPartNoise);
     msg = ok ? "Störgeräusch gespeichert (" + String(noise_.count) + " gelernt)"
              : String("FEHLER: Störgeräusch konnte nicht gespeichert werden!");
     Serial.printf("[teach] %s\n", msg.c_str());
@@ -523,6 +523,7 @@ bool App::cmdSaveTeach(bool add, String* note) {
     return true;
   }
 
+  const DetectorSettings before = settings_;  // für den Änderungsbericht / "beibehalten"
   if (add && profile_.valid && !profile_.isDefault()) {
     // Ergänzen: Muster anhängen; Schwellen so wählen, dass beide Aufnahmen
     // erkannt werden (jeweils die tolerantere). Die neue Aufnahme vorher auf
@@ -549,9 +550,26 @@ bool App::cmdSaveTeach(bool add, String* note) {
     msg = "Profil gespeichert";
   }
   if (r.suggestedOffDelayMs > settings_.offDelayMs) settings_.offDelayMs = r.suggestedOffDelayMs;
-
   settings::clamp(settings_);
-  if (!persistLocked()) msg = "FEHLER: Profil konnte nicht gespeichert werden!";
+
+  // Schwellen: auf Wunsch die bisherigen behalten, sonst die Änderungen melden
+  if (keepSettings) {
+    settings_ = before;
+    msg += " – Schwellen unverändert";
+  } else {
+    String changes;
+    auto diff = [&](const char* label, float a, float b, const char* fmt) {
+      if (fabsf(a - b) < 0.005f) return;
+      char buf[64];
+      snprintf(buf, sizeof(buf), fmt, label, a, b);
+      changes += (changes.isEmpty() ? "" : ", ") + String(buf);
+    };
+    diff("Muster-Schwelle", before.similarityThreshold, settings_.similarityThreshold, "%s %.2f → %.2f");
+    diff("Takt-Schwelle", before.periodicityThreshold, settings_.periodicityThreshold, "%s %.2f → %.2f");
+    diff("Ausschaltverz.", before.offDelayMs / 1000.0f, settings_.offDelayMs / 1000.0f, "%s %.1f → %.1f s");
+    if (!changes.isEmpty()) msg += ". Geändert: " + changes;
+  }
+  if (!persistLocked(settings::kPartPump)) msg = "FEHLER: Profil konnte nicht gespeichert werden!";
   detector_.setProfile(profile_);
   detector_.setSettings(settings_);
   teach_.cancel();
@@ -572,7 +590,7 @@ bool App::cmdDeleteGrinder(uint8_t index) {
   --g.count;
   detector_.reset();
   Serial.printf("[profil] Mühle %u gelöscht\n", index + 1);
-  return persistLocked();
+  return persistLocked(settings::kPartGrinders);
 }
 
 bool App::cmdRenameGrinder(uint8_t index, const String& name) {
@@ -581,13 +599,13 @@ bool App::cmdRenameGrinder(uint8_t index, const String& name) {
   n.trim();
   if (index >= grinders_.count || n.isEmpty()) return false;
   strlcpy(grinders_.names[index], n.c_str(), GrinderProfile::kNameLen);
-  return persistLocked();
+  return persistLocked(settings::kPartGrinders);
 }
 
 void App::cmdClearNoise() {
   Lock lock(mutex_);
   noise_.count = 0;
-  persistLocked();
+  persistLocked(settings::kPartNoise);
   detector_.setNoise(noise_);
   Serial.println("[teach] Störgeräusche gelöscht");
 }
@@ -600,7 +618,7 @@ bool App::cmdDeleteNoise(uint8_t index) {
   --noise_.count;
   detector_.setNoise(noise_);
   Serial.printf("[profil] Störgeräusch %u gelöscht\n", index + 1);
-  return persistLocked();
+  return persistLocked(settings::kPartNoise);
 }
 
 bool App::cmdDeleteTemplate(uint8_t index) {
@@ -612,7 +630,7 @@ bool App::cmdDeleteTemplate(uint8_t index) {
   --profile_.templateCount;
   detector_.setProfile(profile_);
   Serial.printf("[profil] Klangmuster %u gelöscht\n", index + 1);
-  return persistLocked();
+  return persistLocked(settings::kPartPump);
 }
 
 void App::cmdResetTimer(bool withScale) {
@@ -684,14 +702,14 @@ void App::loadSlotLocked(uint8_t slot) {
                 profile_.isDefault() ? " (Standardprofil)" : "");
 }
 
-bool App::persistLocked() {
-  settingsDirty_ = false;  // speichert auch die Einstellungen mit
+bool App::persistLocked(uint8_t parts) {
+  if (parts & settings::kPartPump) settingsDirty_ = false;  // Einstellungen liegen in der Pumpen-Datei
   memcpy(slotBuf().name, slotName_, sizeof(slotBuf().name));
   slotBuf().pump = profile_;
   slotBuf().noise = noise_;
   slotBuf().settings = settings_;
   slotBuf().grinders = grinders_;
-  lastSaveOk_ = settings::saveSlot(activeSlot_, slotBuf());
+  lastSaveOk_ = settings::saveSlot(activeSlot_, slotBuf(), parts);  // nur die geänderten Dateien
   summarize(slotBuf(), lastSaveOk_, summaries_[activeSlot_]);
   if (!lastSaveOk_) Serial.println("[profil] FEHLER: Speichern fehlgeschlagen");
   return lastSaveOk_;
@@ -713,7 +731,7 @@ void App::slots(SlotSummary (&out)[cfg::kProfileSlots], uint8_t& active) {
 void App::cmdSelectSlot(uint8_t slot) {
   if (slot >= cfg::kProfileSlots) return;
   Lock lock(mutex_);
-  if (settingsDirty_) persistLocked();  // offene Änderungen gehören zum bisherigen Slot
+  if (settingsDirty_) persistLocked(settings::kPartPump);  // offene Änderungen gehören zum bisherigen Slot
   teach_.cancel();
   timer_.reset();
   loadSlotLocked(slot);
@@ -728,11 +746,11 @@ bool App::cmdRenameSlot(uint8_t slot, const String& name) {
   if (n.isEmpty()) return false;
   if (slot == activeSlot_) {
     strlcpy(slotName_, n.c_str(), sizeof(slotName_));
-    return persistLocked();
+    return persistLocked(settings::kPartPump);
   }
   settings::loadSlot(slot, slotBuf());
   strlcpy(slotBuf().name, n.c_str(), sizeof(slotBuf().name));
-  const bool ok = settings::saveSlot(slot, slotBuf());
+  const bool ok = settings::saveSlot(slot, slotBuf(), settings::kPartPump);  // Name liegt in der Pumpen-Datei
   summarize(slotBuf(), ok, summaries_[slot]);
   return ok;
 }
@@ -764,12 +782,14 @@ ProfileSlot& App::slotLocked(uint8_t slot) {
   return s;
 }
 
-bool App::exportSlot(uint8_t slot, String& out, String& name) {
+bool App::exportSlot(uint8_t slot, String& name, String& pump, String& grinders, String& noise) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
   const ProfileSlot& s = slotLocked(slot);
   name = s.name;
-  return settings::encodeSlot(s, out);
+  return settings::encodePart(s, settings::kPartPump, pump) &&
+         settings::encodePart(s, settings::kPartGrinders, grinders) &&
+         settings::encodePart(s, settings::kPartNoise, noise);
 }
 
 namespace {
@@ -846,16 +866,45 @@ bool App::slotText(uint8_t slot, String& out) {
   return true;
 }
 
-bool App::cmdImportSlot(uint8_t slot, const String& data) {
-  if (slot >= cfg::kProfileSlots) return false;
+bool App::cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const String& grinders,
+                        const String& noise, const String& legacy) {
+  parts &= settings::kPartAll;
+  if (slot >= cfg::kProfileSlots || !parts) return false;
   Lock lock(mutex_);
-  if (!settings::decodeSlot(data, slotBuf())) return false;
-  const bool ok = settings::saveSlot(slot, slotBuf());
-  summarize(slotBuf(), ok, summaries_[slot]);
+  // Quelle in einen eigenen (PSRAM-)Puffer lesen
+  static ProfileSlot* src = [] {
+    void* mem = heap_caps_malloc(sizeof(ProfileSlot), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return new (mem ? mem : malloc(sizeof(ProfileSlot))) ProfileSlot();
+  }();
+  settings::defaultSlot(slot, *src);
+  if (!legacy.isEmpty()) {
+    if (!settings::decodeSlot(legacy, *src)) return false;
+  } else {
+    const struct { uint8_t part; const String& text; } in[] = {
+        {settings::kPartPump, pump}, {settings::kPartGrinders, grinders}, {settings::kPartNoise, noise}};
+    for (const auto& i : in) {
+      if ((parts & i.part) && !settings::decodePart(i.text, i.part, *src)) return false;
+    }
+  }
+  // Ziel: aktueller Stand des Slots, nur die gewählten Teile ersetzen
+  if (slot == activeSlot_ && settingsDirty_) persistLocked(settings::kPartPump);
+  ProfileSlot& dst = slotLocked(slot);
+  if (parts & settings::kPartPump) {
+    memcpy(dst.name, src->name, sizeof(dst.name));
+    dst.pump = src->pump;
+    dst.settings = src->settings;
+  }
+  if (parts & settings::kPartGrinders) dst.grinders = src->grinders;
+  if (parts & settings::kPartNoise) dst.noise = src->noise;
+  const bool ok = settings::saveSlot(slot, dst, parts);
+  summarize(dst, ok, summaries_[slot]);
   if (ok && slot == activeSlot_) {
     teach_.cancel();
     loadSlotLocked(slot);
   }
+  Serial.printf("[profil] Import in Slot %u: %s%s%s%s\n", slot + 1, (parts & settings::kPartPump) ? "Pumpe " : "",
+                (parts & settings::kPartGrinders) ? "Mühlen " : "", (parts & settings::kPartNoise) ? "Störgeräusche" : "",
+                ok ? "" : " – FEHLER");
   return ok;
 }
 

@@ -347,16 +347,20 @@ void handleProfiles() {
 
 void handleProfileExport() {
   const int slot = server.arg("slot").toInt();
-  String data, name;
-  if (slot < 0 || slot >= (int)cfg::kProfileSlots || !app.exportSlot(slot, data, name)) {
+  String name, pump, grinders, noise;
+  if (slot < 0 || slot >= (int)cfg::kProfileSlots || !app.exportSlot(slot, name, pump, grinders, noise)) {
     sendOk(false, "Export fehlgeschlagen");
     return;
   }
+  // Version 2: jeder Teil einzeln (beim Import einzeln auswählbar)
   JsonDocument doc;
   doc["format"] = "coffeetimer-profile";
+  doc["version"] = 2;
   doc["firmware"] = cfg::kFirmwareVersion;
   doc["name"] = name;
-  doc["data"] = data;
+  doc["pump"] = pump;          // Pumpe + Einstellungen + Profilname
+  doc["grinders"] = grinders;  // Mühlen
+  doc["noise"] = noise;        // Störgeräusche
   String out;
   serializeJson(doc, out);
   // Dateiname ohne Sonderzeichen
@@ -430,11 +434,21 @@ void begin() {
     sendOk(ok, ok ? "Profil gelöscht – Standardprofil aktiv" : "Löschen fehlgeschlagen");
   });
   server.on("/api/profiles/import", HTTP_POST, [] {
-    // Body {"slot": n, "data": "<Base64 aus der Exportdatei>"}
+    // Body {"slot": n, "parts": ["pump","grinders","noise"], "pump": "...", "grinders": "...",
+    //       "noise": "..."}  bzw. bei Exporten älterer Firmware "data": "..." (alle Teile)
     JsonDocument in;
     const int slot = slotFromBody(in);
-    const bool ok = slot >= 0 && app.cmdImportSlot(slot, in["data"] | "");
-    sendOk(ok, ok ? "Profil importiert" : "Import fehlgeschlagen (Datei ungültig oder andere Version)");
+    uint8_t parts = 0;
+    for (JsonVariant p : in["parts"].as<JsonArray>()) {
+      const String name = p.as<String>();
+      if (name == "pump") parts |= settings::kPartPump;
+      if (name == "grinders") parts |= settings::kPartGrinders;
+      if (name == "noise") parts |= settings::kPartNoise;
+    }
+    if (!parts) return sendOk(false, "Nichts zum Importieren ausgewählt");
+    const bool ok = slot >= 0 && app.cmdImportSlot(slot, parts, in["pump"] | "", in["grinders"] | "",
+                                                   in["noise"] | "", in["data"] | "");
+    sendOk(ok, ok ? "Import abgeschlossen" : "Import fehlgeschlagen (Datei ungültig oder andere Version)");
   });
   // Einzelnes Störgeräusch / Klangmuster löschen, Body {"index": n}
   server.on("/api/noise/delete", HTTP_POST, [] {
@@ -537,12 +551,12 @@ void begin() {
   server.on("/api/teach/cancel", HTTP_POST, [] { app.cmdCancelTeach(); sendOk(); });
   server.on("/api/teach/finish", HTTP_POST, [] { app.cmdFinishTeach(); sendOk(); });
   server.on("/api/teach/save", HTTP_POST, [] {
-    // Body {"mode": "replace" | "add"}
+    // Body {"mode": "replace" | "add", "keepSettings": bool}
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
     const bool add = strcmp(in["mode"] | "replace", "add") == 0;
     String note;
-    const bool ok = app.cmdSaveTeach(add, &note);
+    const bool ok = app.cmdSaveTeach(add, &note, in["keepSettings"] | false);
     sendOk(ok, ok ? note.c_str() : "Ergebnis fehlerhaft – nicht speicherbar");
   });
   server.on("/api/timer/reset", HTTP_POST, [] { app.cmdResetTimer(); sendOk(); });
