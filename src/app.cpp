@@ -27,6 +27,8 @@ constexpr BaseType_t kAudioTaskCore = 0;  // Core 1 gehört loop() (Display/Web)
 void App::begin() {
   mutex_ = xSemaphoreCreateMutex();
   detector_.setGrinders(&grinders_);  // Zeiger bleibt gültig, Inhalt wechselt mit dem Slot
+  useClassifier_ = settings::loadUseClassifier();
+  detector_.setClassifier(&classifier_, useClassifier_);
 
   activeSlot_ = settings::loadActiveSlot();
   micGain_ = settings::loadMicGain();
@@ -332,6 +334,20 @@ void App::diagnosticsText(String& out) {
         names.c_str(), (unsigned long)grinderStarts_, scale::doseMode() ? "aktiv" : "aus", doseG_);
   }
 
+  {
+    size_t perKind[4] = {};
+    for (const classifier::Record& r : training_.records) perKind[static_cast<int>(r.kind)] += r.count();
+    add("KI-Erkennung: %s, %s, %u Klassen, Trefferquote %.0f%%, Klangbilder: Pumpe %u, Muehlen %u, "
+        "Stoer %u, Ruhe %u", useClassifier_ ? "an" : "aus", classifier_.ready() ? "trainiert" : "nicht trainiert",
+        (unsigned)classifier_.classCount(), classifier_.trainingAccuracy() * 100.0f, (unsigned)perKind[0],
+        (unsigned)perKind[1], (unsigned)perKind[2], (unsigned)perKind[3]);
+    const FrameScores& sc = detector_.status().scores;
+    if (sc.clsActive) {
+      add("  live: %s %u (%.0f%%), Pumpe %.0f%%", classifier::kindName(sc.clsKind), sc.clsIndex + 1,
+          sc.clsProb * 100.0f, sc.clsPump * 100.0f);
+    }
+  }
+
   out += "\nJetzt:\n";
   scores("live", detector_.status().scores);
   add("  Pumpe=%d roh=%d verworfen=%d Pegel=%.1f dBFS, Hintergrund %.1f dBFS%s (umgerechnet auf "
@@ -376,6 +392,11 @@ void App::snapshot(StatusSnapshot& out) {
   memcpy(out.grinderNames, grinders_.names, sizeof(out.grinderNames));
   out.grinderActive = detector_.status().grinderIndex;
   out.grinderOn = detector_.status().grinderOn;
+  out.clsEnabled = useClassifier_;
+  out.clsReady = classifier_.ready();
+  out.clsClasses = classifier_.classCount();
+  out.clsFrames = classifier_.frameCount();
+  out.clsAccuracy = classifier_.trainingAccuracy();
   out.clipRatio = clipPeak_;
   {
     const vibration::Status v = vibration::status();
@@ -488,17 +509,36 @@ bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
     if ((add || full) && g.count > 0) {
       const uint8_t target = r.grinderMatch >= 0 && r.grinderMatch < g.count ? r.grinderMatch : 0;
       PumpDetector::mergeNoise(g.entries[target], r.noise);
+      learnFromTeachLocked(classifier::Kind::Grinder, target, false);
       msg = String(g.names[target]) + " ergänzt (" + String(g.entries[target].templateCount) +
             " Klangmuster)" + (full && !add ? " – Liste voll" : "");
     } else {
       const uint8_t i = g.count++;
       g.entries[i] = r.noise;
       snprintf(g.names[i], GrinderProfile::kNameLen, "Mühle %u", (unsigned)(i + 1));
+      learnFromTeachLocked(classifier::Kind::Grinder, i, false);
       msg = String(g.names[i]) + " gespeichert";
     }
     detector_.reset();
     teach_.cancel();
     if (!persistLocked(settings::kPartGrinders)) msg = "FEHLER: Mühle konnte nicht gespeichert werden!";
+    Serial.printf("[teach] %s\n", msg.c_str());
+    if (note) *note = msg;
+    return true;
+  }
+
+  if (r.mode == TeachMode::Noise && add && noise_.count > 0) {
+    // Weitere Aufnahme desselben Geräts: in das ähnlichste Störgeräusch übernehmen
+    const uint8_t target = r.noiseMatch >= 0 && r.noiseMatch < noise_.count ? r.noiseMatch : noise_.count - 1;
+    PumpDetector::mergeNoise(noise_.entries[target], r.noise);
+    learnFromTeachLocked(classifier::Kind::Noise, target, false);
+    detector_.setNoise(noise_);
+    detector_.reset();
+    teach_.cancel();
+    msg = persistLocked(settings::kPartNoise)
+              ? "Störgeräusch " + String(target + 1) + " ergänzt (" + String(noise_.entries[target].templateCount) +
+                    " Klangmuster)"
+              : String("FEHLER: Störgeräusch konnte nicht gespeichert werden!");
     Serial.printf("[teach] %s\n", msg.c_str());
     if (note) *note = msg;
     return true;
@@ -510,8 +550,10 @@ bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
       memmove(&noise_.entries[0], &noise_.entries[1],
               sizeof(NoiseProfile::Entry) * (cfg::kMaxNoises - 1));
       --noise_.count;
+      training_.removeEntry(classifier::Kind::Noise, 0);  // Trainingsdaten mitverschieben
     }
     noise_.entries[noise_.count++] = r.noise;
+    learnFromTeachLocked(classifier::Kind::Noise, noise_.count - 1, false);
     detector_.setNoise(noise_);
     detector_.reset();
     teach_.cancel();
@@ -536,6 +578,7 @@ bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
     for (float& b : incoming.bgBandDb) b += offset;
     const bool wasPeriodic = profile_.periodic;
     PumpDetector::mergeProfile(profile_, incoming, msg);
+    learnFromTeachLocked(classifier::Kind::Pump, 0, false);
     settings_.similarityThreshold = fminf(settings_.similarityThreshold, r.suggestedSimilarity);
     if (profile_.periodic && wasPeriodic) {
       settings_.periodicityThreshold = fminf(settings_.periodicityThreshold, r.suggestedPeriodicity);
@@ -544,6 +587,7 @@ bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
   } else {
     // Ersetzen: Profil und Schwellen komplett aus der Aufnahme übernehmen.
     profile_ = r.profile;
+    learnFromTeachLocked(classifier::Kind::Pump, 0, true);  // alte Pumpen-Aufnahmen ersetzen
     // micGain kommt aus der Aufnahme (Verstärkung beim Teach)
     settings_.similarityThreshold = r.suggestedSimilarity;
     settings_.periodicityThreshold = r.suggestedPeriodicity;
@@ -588,6 +632,8 @@ bool App::cmdDeleteGrinder(uint8_t index) {
   memmove(&g.entries[index], &g.entries[index + 1], sizeof(g.entries[0]) * (g.count - index - 1));
   memmove(g.names[index], g.names[index + 1], sizeof(g.names[0]) * (g.count - index - 1));
   --g.count;
+  training_.removeEntry(classifier::Kind::Grinder, index);
+  retrainLocked(true);
   detector_.reset();
   Serial.printf("[profil] Mühle %u gelöscht\n", index + 1);
   return persistLocked(settings::kPartGrinders);
@@ -605,6 +651,8 @@ bool App::cmdRenameGrinder(uint8_t index, const String& name) {
 void App::cmdClearNoise() {
   Lock lock(mutex_);
   noise_.count = 0;
+  training_.removeKind(classifier::Kind::Noise);
+  retrainLocked(true);
   persistLocked(settings::kPartNoise);
   detector_.setNoise(noise_);
   Serial.println("[teach] Störgeräusche gelöscht");
@@ -616,6 +664,8 @@ bool App::cmdDeleteNoise(uint8_t index) {
   memmove(&noise_.entries[index], &noise_.entries[index + 1],
           sizeof(NoiseProfile::Entry) * (noise_.count - index - 1));
   --noise_.count;
+  training_.removeEntry(classifier::Kind::Noise, index);
+  retrainLocked(true);
   detector_.setNoise(noise_);
   Serial.printf("[profil] Störgeräusch %u gelöscht\n", index + 1);
   return persistLocked(settings::kPartNoise);
@@ -698,6 +748,8 @@ void App::loadSlotLocked(uint8_t slot) {
   detector_.setProfile(profile_);
   detector_.setNoise(noise_);
   detector_.setSettings(settings_);
+  settings::loadTraining(activeSlot_, training_);
+  retrainLocked(false);
   Serial.printf("[profil] Slot %u aktiv: %s%s\n", activeSlot_ + 1, slotName_,
                 profile_.isDefault() ? " (Standardprofil)" : "");
 }
@@ -782,14 +834,18 @@ ProfileSlot& App::slotLocked(uint8_t slot) {
   return s;
 }
 
-bool App::exportSlot(uint8_t slot, String& name, String& pump, String& grinders, String& noise) {
+bool App::exportSlot(uint8_t slot, String& name, String& pump, String& grinders, String& noise, String& training) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
   const ProfileSlot& s = slotLocked(slot);
   name = s.name;
+  // Trainingsdaten: aktiver Slot aus dem Speicher, sonst aus der Datei
+  classifier::TrainingSet other;
+  if (slot != activeSlot_) settings::loadTraining(slot, other);
   return settings::encodePart(s, settings::kPartPump, pump) &&
          settings::encodePart(s, settings::kPartGrinders, grinders) &&
-         settings::encodePart(s, settings::kPartNoise, noise);
+         settings::encodePart(s, settings::kPartNoise, noise) &&
+         settings::encodeTraining(slot == activeSlot_ ? training_ : other, training);
 }
 
 namespace {
@@ -867,7 +923,7 @@ bool App::slotText(uint8_t slot, String& out) {
 }
 
 bool App::cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const String& grinders,
-                        const String& noise, const String& legacy) {
+                        const String& noise, const String& legacy, const String& training) {
   parts &= settings::kPartAll;
   if (slot >= cfg::kProfileSlots || !parts) return false;
   Lock lock(mutex_);
@@ -898,6 +954,33 @@ bool App::cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const S
   if (parts & settings::kPartNoise) dst.noise = src->noise;
   const bool ok = settings::saveSlot(slot, dst, parts);
   summarize(dst, ok, summaries_[slot]);
+  // KI-Trainingsdaten der importierten Teile: aus der Datei übernehmen (falls
+  // mitgeliefert und gewählt), sonst verwerfen – passend zu den neuen Einträgen.
+  if (ok) {
+    classifier::TrainingSet t, in;
+    settings::loadTraining(slot, t);
+    const bool withTraining = !training.isEmpty() && settings::decodeTraining(training, in);
+    const struct { uint8_t part; classifier::Kind kind; } map[] = {
+        {settings::kPartPump, classifier::Kind::Pump},
+        {settings::kPartGrinders, classifier::Kind::Grinder},
+        {settings::kPartNoise, classifier::Kind::Noise}};
+    for (const auto& m : map) {
+      if (!(parts & m.part)) continue;
+      t.removeKind(m.kind);
+      if (!withTraining) continue;
+      for (classifier::Record& r : in.records) {
+        if (r.kind == m.kind) t.records.push_back(r);
+      }
+    }
+    // Ruhe-Klangbilder gehören zur Aufnahme der Pumpe -> mit ihr übernehmen
+    if (withTraining && (parts & settings::kPartPump)) {
+      t.removeKind(classifier::Kind::Background);
+      for (classifier::Record& r : in.records) {
+        if (r.kind == classifier::Kind::Background) t.records.push_back(r);
+      }
+    }
+    settings::saveTraining(slot, t);
+  }
   if (ok && slot == activeSlot_) {
     teach_.cancel();
     loadSlotLocked(slot);
@@ -906,6 +989,44 @@ bool App::cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const S
                 (parts & settings::kPartGrinders) ? "Mühlen " : "", (parts & settings::kPartNoise) ? "Störgeräusche" : "",
                 ok ? "" : " – FEHLER");
   return ok;
+}
+
+void App::learnFromTeachLocked(classifier::Kind kind, uint8_t index, bool replaceKind) {
+  // Je Klasse 5 Aufnahmen (z. B. 1× Ersetzen + 4× Ergänzen), Ruhe aus den letzten 10
+  // Teachs; erst darüber verdrängt eine neue Aufnahme die älteste.
+  auto maxPer = [](classifier::Kind k) -> size_t {
+    return k == classifier::Kind::Background ? cfg::kClsMaxBackground : cfg::kClsMaxRecords;
+  };
+  if (replaceKind) training_.removeKind(kind);
+  classifier::Record rec;
+  rec.kind = kind;
+  rec.index = index;
+  teach_.trainingFrames(false, rec.frames, classifier::kMaxFramesPerRecord);
+  if (rec.count()) training_.add(std::move(rec), maxPer(kind));
+  classifier::Record bg;
+  bg.kind = classifier::Kind::Background;
+  teach_.trainingFrames(true, bg.frames, classifier::kMaxFramesPerRecord);
+  if (bg.count()) training_.add(std::move(bg), maxPer(classifier::Kind::Background));
+  retrainLocked(true);
+}
+
+void App::retrainLocked(bool save) {
+  if (save) settings::saveTraining(activeSlot_, training_);
+  const uint32_t t0 = millis();
+  classifier_.train(training_);
+  detector_.reset();
+  Serial.printf("[ki] %s: %u Klassen, %u Klangbilder, Trefferquote %.0f %% (%lu ms)\n",
+                classifier_.ready() ? "trainiert" : "nicht einsatzbereit", (unsigned)classifier_.classCount(),
+                (unsigned)classifier_.frameCount(), classifier_.trainingAccuracy() * 100.0f,
+                (unsigned long)(millis() - t0));
+}
+
+void App::cmdSetUseClassifier(bool on) {
+  Lock lock(mutex_);
+  useClassifier_ = on;
+  settings::saveUseClassifier(on);
+  detector_.setClassifier(&classifier_, on);
+  detector_.reset();
 }
 
 void App::cmdSetMicGain(uint8_t gain) {

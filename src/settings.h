@@ -18,6 +18,7 @@
 
 #include <new>
 
+#include "classifier.h"
 #include "config.h"
 
 /**
@@ -175,6 +176,14 @@ bool slotExists(uint8_t slot);
 bool encodeSlot(const ProfileSlot& in, String& out);
 bool decodeSlot(const String& in, ProfileSlot& out);
 
+/// Trainingsdaten des Klassifikators (eigene Datei /slotN_train.bin).
+/// load: false = keine/ungültige Datei (set ist dann leer).
+bool loadTraining(uint8_t slot, classifier::TrainingSet& set);
+bool saveTraining(uint8_t slot, const classifier::TrainingSet& set);
+/// Trainingsdaten als Text (Base64, gleicher Aufbau wie die Datei) bzw. zurück.
+bool encodeTraining(const classifier::TrainingSet& set, String& out);
+bool decodeTraining(const String& in, classifier::TrainingSet& set);
+
 /// Ein Teil eines Slots (kPartPump / kPartNoise / kPartGrinders) als Text
 /// (Base64, gleicher Aufbau wie die Datei) bzw. zurück. decodePart schreibt
 /// nur den angegebenen Teil von out.
@@ -183,6 +192,10 @@ bool decodePart(const String& in, uint8_t part, ProfileSlot& out);
 
 uint8_t loadActiveSlot();
 void saveActiveSlot(uint8_t slot);
+
+/// KI-Erkennung (Klassifikator) an/aus – gilt für alle Profile.
+bool loadUseClassifier();
+void saveUseClassifier(bool on);
 
 uint8_t loadMicGain();
 void saveMicGain(uint8_t gain);

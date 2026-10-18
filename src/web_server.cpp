@@ -160,6 +160,7 @@ void handleStatus() {
     res["noiseHitAfter"] = r.noiseHitAfter;
     res["grinderMatch"] = r.grinderMatch;
     res["grinderMatchSim"] = r.grinderMatchSim;
+    res["noiseMatch"] = r.noiseMatch;
     res["templates"] = r.profile.templateCount;
     res["periodHz"] = r.profile.periodHz();
     res["suggestedSimilarity"] = r.suggestedSimilarity;
@@ -204,6 +205,19 @@ void handleStatus() {
     o["name"] = String(f.name);
     o["addr"] = String(f.addr);
     o["rssi"] = f.rssi;
+  }
+
+  JsonObject cls = doc["classifier"].to<JsonObject>();
+  cls["enabled"] = s.clsEnabled;
+  cls["ready"] = s.clsReady;
+  cls["classes"] = s.clsClasses;
+  cls["frames"] = s.clsFrames;
+  cls["accuracy"] = s.clsAccuracy;
+  if (s.detector.scores.clsActive) {
+    cls["kind"] = classifier::kindName(s.detector.scores.clsKind);
+    cls["index"] = s.detector.scores.clsIndex;
+    cls["prob"] = s.detector.scores.clsProb;
+    cls["pump"] = s.detector.scores.clsPump;
   }
 
   JsonObject vib = doc["vibration"].to<JsonObject>();
@@ -347,8 +361,8 @@ void handleProfiles() {
 
 void handleProfileExport() {
   const int slot = server.arg("slot").toInt();
-  String name, pump, grinders, noise;
-  if (slot < 0 || slot >= (int)cfg::kProfileSlots || !app.exportSlot(slot, name, pump, grinders, noise)) {
+  String name, pump, grinders, noise, training;
+  if (slot < 0 || slot >= (int)cfg::kProfileSlots || !app.exportSlot(slot, name, pump, grinders, noise, training)) {
     sendOk(false, "Export fehlgeschlagen");
     return;
   }
@@ -361,6 +375,7 @@ void handleProfileExport() {
   doc["pump"] = pump;          // Pumpe + Einstellungen + Profilname
   doc["grinders"] = grinders;  // Mühlen
   doc["noise"] = noise;        // Störgeräusche
+  doc["training"] = training;  // KI-Trainingsdaten (Klangbilder)
   String out;
   serializeJson(doc, out);
   // Dateiname ohne Sonderzeichen
@@ -447,7 +462,8 @@ void begin() {
     }
     if (!parts) return sendOk(false, "Nichts zum Importieren ausgewählt");
     const bool ok = slot >= 0 && app.cmdImportSlot(slot, parts, in["pump"] | "", in["grinders"] | "",
-                                                   in["noise"] | "", in["data"] | "");
+                                                   in["noise"] | "", in["data"] | "",
+                                                   in["withTraining"] | false ? (in["training"] | "") : "");
     sendOk(ok, ok ? "Import abgeschlossen" : "Import fehlgeschlagen (Datei ungültig oder andere Version)");
   });
   // Einzelnes Störgeräusch / Klangmuster löschen, Body {"index": n}
@@ -534,6 +550,14 @@ void begin() {
     c.thresholdDb = in["thresholdDb"] | c.thresholdDb;
     vibration::setConfig(c);
     sendOk(true, (String("Erkennung: ") + vibration::modeName(vibration::config().mode)).c_str());
+  });
+  // KI-Erkennung an/aus: Body {"enabled": bool}
+  server.on("/api/classifier", HTTP_POST, [] {
+    JsonDocument in;
+    if (deserializeJson(in, server.arg("plain"))) return sendOk(false, "Ungültiges JSON");
+    const bool on = in["enabled"] | false;
+    app.cmdSetUseClassifier(on);
+    sendOk(true, on ? "KI-Erkennung eingeschaltet" : "KI-Erkennung ausgeschaltet");
   });
   server.on("/api/mic", HTTP_POST, [] {
     JsonDocument in;

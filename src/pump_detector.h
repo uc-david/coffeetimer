@@ -30,6 +30,7 @@
 #pragma once
 
 #include "audio_features.h"
+#include "classifier.h"
 #include "settings.h"
 
 /// Vergleichswerte eines Frames mit Pumpen- und Störgeräusch-Profil.
@@ -49,6 +50,12 @@ struct FrameScores {
   float grinderLevelRatio = 0.0f; ///< Pegel relativ zum Hintergrund (0) .. Mahlpegel (1) der Mühle
   bool bestIsGrinder = false;    ///< eine Mühle passt besser als alle Störgeräusche
   float steadiness = 99.0f;      ///< Pegelschwankung in dB (klein = gleichmäßig)
+  /// KI-Erkennung (Klassifikator): entscheidet statt der Klangmuster, was zu hören ist
+  bool clsActive = false;
+  classifier::Kind clsKind = classifier::Kind::Background;
+  uint8_t clsIndex = 0;
+  float clsProb = 0.0f;          ///< Wahrscheinlichkeit der erkannten Klasse
+  float clsPump = 0.0f;          ///< Wahrscheinlichkeit "Pumpe"
 };
 
 /**
@@ -97,6 +104,11 @@ class PumpDetector {
   void setSettings(const DetectorSettings& s) { settings_ = s; }
   /// Gelernte Mühlen (Zeiger bleibt gültig, Zugriff nur unter dem App-Mutex).
   void setGrinders(const GrinderProfile* g) { grinders_ = g; }
+  /// KI-Erkennung: trainierter Klassifikator (Zeiger bleibt gültig) und ob er genutzt wird.
+  void setClassifier(const classifier::Classifier* c, bool enabled) {
+    classifier_ = c;
+    useClassifier_ = enabled;
+  }
   /// Aktuelle Mikrofon-Verstärkung: Frames kommen unverändert, jedes Geräusch
   /// rechnet auf die Verstärkung seiner eigenen Aufnahme um.
   void setMicGain(float gain) { gain_ = gain; }
@@ -197,7 +209,9 @@ class PumpDetector {
   /// Standardprofil: Raumpegel automatisch nachführen.
   void updateAutoBackground(float rmsDb);
   /// Mühle erkennen: lautes Geräusch, das dem Mühlen-Störgeräusch ähnlicher ist als der Pumpe.
-  void updateGrinder(uint32_t now);
+  void updateGrinder(uint32_t now, float rawRmsDb);
+  const classifier::Classifier* classifier_ = nullptr;
+  bool useClassifier_ = false;
 
   const GrinderProfile* grinders_ = nullptr;
   float gain_ = cfg::kMicGainDefault;

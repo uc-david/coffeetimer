@@ -168,6 +168,7 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
         <div class="field"><label><span><input type="checkbox" id="impPump"> Pumpe + Einstellungen + Profilname</span></label></div>
         <div class="field"><label><span><input type="checkbox" id="impGrinders"> Mühlen</span></label></div>
         <div class="field"><label><span><input type="checkbox" id="impNoise"> Störgeräusche</span></label></div>
+        <div class="field"><label><span><input type="checkbox" id="impTraining"> KI-Trainingsdaten der gewählten Teile</span></label></div>
         <small style="color:var(--muted)">Nur die angehakten Teile werden im gewählten Platz ersetzt – alles andere bleibt
           unverändert.</small>
         <div class="row" style="margin-top:6px"><button class="primary" onclick="importProfile()">Importieren</button></div>
@@ -257,6 +258,15 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
   <section class="card">
     <h2>Erkennung</h2>
     <div class="kv" id="profileInfo"></div>
+    <div class="field" style="margin-top:8px">
+      <label><span><input type="checkbox" id="clsEnabled" onchange="setClassifier()"> KI-Erkennung (Klassifikator)</span>
+        <b id="clsState"></b></label>
+      <div class="kv" id="clsInfo"></div>
+      <small>Lernt aus allen Teach-Aufnahmen dieses Profils, worin sich Pumpe, Mühlen, Störgeräusche und Ruhe
+        unterscheiden, und entscheidet damit, was gerade zu hören ist. Pegel, Gleichmäßigkeit und Vibration gelten wie
+        gewohnt. Braucht neue Teach-Aufnahmen (mind. Pumpe); je mehr Geräusche eingelernt sind, desto besser.
+        Ausgeschaltet arbeitet die Erkennung wie bisher über die Klangmuster.</small>
+    </div>
     <table id="partsList" style="margin-top:8px"></table>
     <small style="color:var(--muted)">Klangmuster: aus dem Teach gelernte Klangbilder der Pumpe (z. B. Anlauf / voller Druck) –
       erkannt wird, wenn eines passt. Störgeräusche: eingelernte Geräusche, die ignoriert werden.</small>
@@ -508,6 +518,15 @@ function render(s) {
     : '<span>Profil: <b>keines</b> – Teach-Modus starten</span>';
   $('noiseClearBtn').disabled = !p.noiseCount;
   renderParts(p);
+  // KI-Erkennung
+  const c = s.classifier || {};
+  $('clsEnabled').checked = !!c.enabled;
+  $('clsState').textContent = !c.ready ? 'nicht trainiert' : `trainiert · Trefferquote ${(c.accuracy * 100).toFixed(0)} %`;
+  $('clsInfo').innerHTML = c.ready
+    ? `<span>Klassen: <b>${c.classes}</b></span><span>Klangbilder: <b>${c.frames}</b></span>` +
+      (c.kind ? `<span>Jetzt: <b>${esc(c.kind)}${c.kind === 'Muehle' || c.kind === 'Stoergeraeusch' ? ' ' + (c.index + 1) : ''}` +
+                ` (${(c.prob * 100).toFixed(0)} %)</b></span>` : '')
+    : '<span>Für das Training Pumpe (und Mühlen/Störgeräusche) neu einlernen.</span>';
   $('netInfo').innerHTML = `<span>Modus: <b>${s.net.ap ? 'Access-Point' : 'WLAN'}</b></span>` +
     `<span>Netz: <b>${esc(s.net.name)}</b></span><span>IP: <b>${esc(s.net.ip)}</b></span>`;
 
@@ -581,8 +600,11 @@ function renderTeach(t) {
   const pumpAdd = usable && profileValid && !profileDefault && t.mode === 'pump';
   const match = t.result && t.result.grinderMatch >= 0 ? grinderNames[t.result.grinderMatch] : null;
   const grinderAdd = usable && grinderMode && !!match;
-  $('addBtn').classList.toggle('hidden', !(pumpAdd || grinderAdd));
-  $('addBtn').textContent = grinderMode ? `Zu „${match}“ hinzufügen` : 'Profil ergänzen';
+  const noiseIdx = t.result && t.result.noiseMatch >= 0 ? t.result.noiseMatch : -1;
+  const noiseAdd = usable && t.mode === 'noise' && noiseIdx >= 0;
+  $('addBtn').classList.toggle('hidden', !(pumpAdd || grinderAdd || noiseAdd));
+  $('addBtn').textContent = grinderMode ? `Zu „${match}“ hinzufügen`
+    : noiseAdd ? `Zu Störgeräusch ${noiseIdx + 1} hinzufügen` : 'Profil ergänzen';
   $('teachHint').textContent = pumpAdd
     ? 'Ergänzen: z. B. erst Leerbezug, dann echten Bezug einlernen – beide werden erkannt.'
     : grinderAdd ? 'Dieselbe Mühle (z. B. anderer Mahlgrad, leer gelaufen)? Dann hinzufügen – sonst als neue Mühle speichern.'
@@ -716,6 +738,8 @@ function readImportFile() {
         $(id).checked = has[key];
         $(id).disabled = !has[key];
       }
+      $('impTraining').checked = !!j.training;
+      $('impTraining').disabled = !j.training;
       $('importInfo').textContent = `„${j.name}“ (${j.data ? 'älteres Format' : 'Teile einzeln'}) – was soll übernommen werden?`;
       $('importParts').classList.remove('hidden');
     } catch (e) { toast('Keine gültige Profil-Datei'); }
@@ -731,7 +755,8 @@ function importProfile() {
   if (!parts.length) { toast('Nichts ausgewählt'); return; }
   const names = { pump: 'Pumpe', grinders: 'Mühlen', noise: 'Störgeräusche' };
   if (!confirm(`In Platz ${slot + 1} ersetzen: ${parts.map(p => names[p]).join(', ')}?\nAlles andere bleibt unverändert.`)) return;
-  slotAction('import', slot, { parts, pump: j.pump, grinders: j.grinders, noise: j.noise, data: j.data });
+  slotAction('import', slot, { parts, pump: j.pump, grinders: j.grinders, noise: j.noise, data: j.data,
+                               training: j.training, withTraining: $('impTraining').checked });
   $('importParts').classList.add('hidden');
   $('importFile').value = '';
   pendingImport = null;
@@ -783,6 +808,7 @@ $('vibTh').addEventListener('input', updateVibLabel);
 function saveVib() {
   post('/api/vibration', { mode: parseInt($('vibMode').value), thresholdDb: parseFloat($('vibTh').value) });
 }
+function setClassifier() { post('/api/classifier', { enabled: $('clsEnabled').checked }); }
 function saveMic() { post('/api/mic', { gain: parseInt($('micGain').value) }); }
 
 function saveTeach(mode) {

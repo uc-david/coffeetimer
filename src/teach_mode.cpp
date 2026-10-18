@@ -357,6 +357,25 @@ void TeachController::process(const AudioFrame& f, const float* curve) {
   }
 }
 
+void TeachController::trainingFrames(bool background, std::vector<int8_t>& out, size_t maxFrames) const {
+  out.clear();
+  const AudioFrame* frames = background ? bgFrames_ : pumpFrames_;
+  const size_t n = background ? bgCount_ : pumpCount_;
+  if (!frames || !n || !maxFrames) return;
+  // Hörbare Frames der Aufnahme (wie in der Auswertung); Ruhe: alle
+  std::vector<size_t> use;
+  use.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    if (background || frames[i].rmsDb >= bgRmsDb_ + cfg::kTeachActiveDb) use.push_back(i);
+  }
+  const size_t take = use.size() < maxFrames ? use.size() : maxFrames;
+  out.resize(take * cfg::kNumBands);
+  for (size_t k = 0; k < take; ++k) {
+    const size_t i = use[k * use.size() / take];  // gleichmäßig verteilt
+    classifier::quantizeShape(frames[i].bandDb, &out[k * cfg::kNumBands]);
+  }
+}
+
 void TeachController::fail(const char* fmt, ...) {
   clearResult();
   result_.quality = TeachQuality::Error;
@@ -967,11 +986,30 @@ void TeachController::analyzeNoise() {
       }
     }
   }
-  // Liste voll: Beim Speichern fällt das älteste Störgeräusch weg – vorher sagen.
+  // Störgeräusch: ähnlichstes vorhandenes (Vorschlag zum Ergänzen, z. B. 5 Aufnahmen
+  // desselben Milchaufschäumers in EINEM Eintrag statt fünf)
+  if (!grinder) {
+    for (uint8_t ni = 0; ni < currentNoise_.count; ++ni) {
+      const NoiseProfile::Entry& ne = currentNoise_.entries[ni];
+      float sim = 0.0f;
+      for (size_t t = 0; t < e.templateCount; ++t) {
+        sim = std::max(sim, PumpDetector::bestTemplate(e.templates[t], ne.templates, ne.templateCount));
+      }
+      if (sim > r.noiseMatchSim) {
+        r.noiseMatchSim = sim;
+        r.noiseMatch = static_cast<int8_t>(ni);
+      }
+    }
+    if (r.noiseMatch >= 0) {
+      r.addMessage("Am ähnlichsten: Störgeräusch %d (%.0f %%) – „Ergänzen“, wenn es dasselbe Gerät ist.",
+                   r.noiseMatch + 1, r.noiseMatchSim * 100.0f);
+    }
+  }
+  // Liste voll: Beim Speichern als neuer Eintrag fällt das älteste weg – vorher sagen.
   if (!grinder && currentNoise_.count >= cfg::kMaxNoises) {
     warning = true;
-    r.addMessage("Liste voll (%u Störgeräusche): Beim Speichern wird Störgeräusch 1 (das älteste) gelöscht. "
-                 "Ggf. vorher ein anderes löschen.", (unsigned)cfg::kMaxNoises);
+    r.addMessage("Liste voll (%u Störgeräusche): Als neues Störgeräusch gespeichert, wird Störgeräusch 1 (das "
+                 "älteste) gelöscht – „Ergänzen“ vermeidet das.", (unsigned)cfg::kMaxNoises);
   }
   if (grinder && grinders_ && grinders_->count >= cfg::kMaxGrinders) {
     r.addMessage("Mühlen-Liste voll (%u): Die Aufnahme kann nur einer vorhandenen Mühle hinzugefügt werden.",

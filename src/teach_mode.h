@@ -36,6 +36,8 @@
  */
 #pragma once
 
+#include <vector>
+
 #include "audio_features.h"
 #include "settings.h"
 
@@ -82,6 +84,8 @@ struct TeachResult {
   NoiseProfile::Entry noise;     ///< gelerntes Störgeräusch / gelernte Mühle
   int8_t grinderMatch = -1;      ///< Mühle: ähnlichste vorhandene Mühle (-1 = keine)
   float grinderMatchSim = 0.0f;  ///< deren Klangmuster-Ähnlichkeit 0..1
+  int8_t noiseMatch = -1;        ///< Störgeräusch: ähnlichstes vorhandenes (-1 = keines)
+  float noiseMatchSim = 0.0f;
 
   // Aus der Aufnahme berechnete Einstellungen (werden beim Speichern übernommen)
   float suggestedSimilarity = 0.75f;
@@ -157,6 +161,13 @@ class TeachController {
 
 
   const TeachResult& result() const { return result_; }
+
+  /**
+   * Klangbilder der letzten Aufnahme für den Klassifikator (quantisierte
+   * Klangfarbe, gleichmäßig auf höchstens maxFrames ausgedünnt).
+   * @param background  true = Ruhe-Phase (Schritt 1), false = hörbarer Teil der Aufnahme
+   */
+  void trainingFrames(bool background, std::vector<int8_t>& out, size_t maxFrames) const;
 
   /// Aktueller Pegel und gemessener Hintergrundpegel in dBFS.
   float liveRmsDb() const { return liveRmsDb_; }

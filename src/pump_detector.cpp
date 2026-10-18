@@ -21,6 +21,10 @@ constexpr float kHystSteady = 1.30f;  // Pegelschwankung darf bei laufender Pump
 
 /// Maximale Rückdatierung des Timer-Starts auf den Beginn der lauten Phase.
 constexpr uint32_t kMaxBackdateMs = 1500;
+/// KI-Erkennung: Mindest-Wahrscheinlichkeit der erkannten Klasse (bzw. während
+/// sie schon gilt – Hysterese).
+constexpr float kClsMinProb = 0.6f;
+constexpr float kClsHoldProb = 0.45f;
 // Mühle: so lange hörbar, bis sie als laufend gilt / Aussetzer, die toleriert
 // werden / Stille, nach der sie als aus gilt.
 constexpr uint32_t kGrinderOnMs = 1000;
@@ -240,6 +244,17 @@ bool PumpDetector::matches(const FrameScores& s, const PumpProfile& p, const Det
     lvlTh *= kHystLevel;
   }
 
+  // KI-Erkennung: Pegel und Gleichmäßigkeit wie immer, WAS es ist entscheidet
+  // der Klassifikator (Mühle / Störgeräusch -> verwerfen).
+  if (s.clsActive) {
+    if (s.levelRatio < lvlTh || s.steadiness > steadyTh) return false;
+    if (s.clsKind == classifier::Kind::Grinder || s.clsKind == classifier::Kind::Noise) {
+      if (rejected) *rejected = true;
+      return false;
+    }
+    return s.clsKind == classifier::Kind::Pump && s.clsProb >= (hysteresis ? kClsHoldProb : kClsMinProb);
+  }
+
   // Standardprofil (ohne Klangmuster): nur Pegel und Gleichmäßigkeit zählen.
   const bool soundsLikePump = p.periodic          ? (s.periodicity >= perTh && s.rhythm >= rhyTh)
                               : p.templateCount == 0 ? true
@@ -367,11 +382,21 @@ void PumpDetector::updateAutoBackground(float rmsDb) {
   profile_.pumpRmsDb = bg + cfg::kDefaultSpanDb;
 }
 
-void PumpDetector::updateGrinder(uint32_t now) {
+void PumpDetector::updateGrinder(uint32_t now, float rawRmsDb) {
   const FrameScores& s = status_.scores;
   const bool on = status_.grinderOn;
   bool raw = false;
-  if (s.bestIsGrinder && !status_.rawActive && !status_.pumpOn) {
+  int8_t index = s.grinderIndex;
+  if (s.clsActive) {
+    // KI-Erkennung: der Klassifikator sagt "Mühle k"; laut genug nach ihrer eigenen Aufnahme
+    if (s.clsKind == classifier::Kind::Grinder && grinders_ && s.clsIndex < grinders_->count &&
+        !status_.rawActive && !status_.pumpOn) {
+      const NoiseProfile::Entry& e = grinders_->entries[s.clsIndex];
+      const float lvl = (rawRmsDb + gainOffsetDb(e.micGain, gain_) - e.bgRmsDb) / fmaxf(e.levelDb - e.bgRmsDb, 3.0f);
+      raw = lvl >= kGrinderLevel * (on ? kHystLevel : 1.0f) && s.clsProb >= (on ? kClsHoldProb : kClsMinProb);
+      index = static_cast<int8_t>(s.clsIndex);
+    }
+  } else if (s.bestIsGrinder && !status_.rawActive && !status_.pumpOn) {
     // Vergleich mit der Pumpe nur, wenn sie eingelernt ist (Muster oder Takt).
     // Ohne gelernte Pumpe entscheiden allein Schwelle und Pegel der Mühle.
     const bool pumpLearned = profile_.templateCount > 0 || profile_.periodic;
@@ -390,7 +415,7 @@ void PumpDetector::updateGrinder(uint32_t now) {
     grinderLastMs_ = now;
     if (!on && now - grinderSinceMs_ >= kGrinderOnMs) {
       status_.grinderOn = true;
-      status_.grinderIndex = s.grinderIndex;
+      status_.grinderIndex = index;
     }
   } else if (grinderSinceMs_ && now - grinderLastMs_ > (on ? kGrinderOffMs : kGrinderGapMs)) {
     grinderSinceMs_ = 0;
@@ -427,9 +452,18 @@ PumpDetector::Event PumpDetector::process(const AudioFrame& f, const float* curv
   const float steadiness = steady_.update(rmsP, loud);
 
   status_.scores = score(f.bandDb, f.rmsDb, curve, steadiness, profile_, noise_, grinders_, gain_);
+  if (useClassifier_ && classifier_ && classifier_->ready()) {
+    const classifier::Result r = classifier_->classify(f.bandDb);
+    FrameScores& s = status_.scores;
+    s.clsActive = r.valid;
+    s.clsKind = r.kind;
+    s.clsIndex = r.index;
+    s.clsProb = r.probability;
+    s.clsPump = r.pumpProbability;
+  }
   status_.rawActive = matches(status_.scores, profile_, settings_, status_.pumpOn,
                               &status_.rejected);
-  updateGrinder(f.timestampMs);
+  updateGrinder(f.timestampMs, f.rmsDb);
   // Vibration: allein entscheidend bzw. zusätzlich erforderlich
   if (source_ == Source::Vib) {
     status_.rawActive = vibActive_;

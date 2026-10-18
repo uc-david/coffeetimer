@@ -202,6 +202,11 @@ constexpr float kMinDoseG = 3.0f;
 /// ... und wird höchstens so lange danach dem nächsten Bezug zugeordnet.
 constexpr uint32_t kDoseValidMs = 15 * 60 * 1000;
 
+/// KI-Erkennung: so viele Teach-Aufnahmen behält der Klassifikator je Pumpe,
+/// Mühle und Störgeräusch (bzw. Ruhe-Phasen) – erst darüber fällt die älteste weg.
+constexpr size_t kClsMaxRecords = 5;
+constexpr size_t kClsMaxBackground = 10;
+
 /// Anzahl der gespeicherten Bezüge in der Historie.
 constexpr size_t kHistorySize = 10;
 

@@ -522,7 +522,9 @@ void drawTeach() {
   btnSave.label = pumpMode && learned                     ? "ERSETZEN"
                   : grinderMode && snap.grinderCount > 0 ? "NEUE MÜHLE"
                                                           : "SPEICHERN";
-  btnAdd.visible = usable && (pumpMode ? learned : grinderMode && snap.grinderCount > 0);
+  btnAdd.visible = usable && (pumpMode      ? learned
+                              : grinderMode ? snap.grinderCount > 0
+                                            : snap.noiseCount > 0);  // Störgeräusch ergänzen
   btnAdd.label = "ERGÄNZEN";
   btnRetry.visible = done && !btnAdd.visible;
   btnCancel.label = done ? "VERWERFEN" : "ABBRECHEN";
@@ -636,7 +638,7 @@ void drawInfo() {
 
 /// Einträge des Einstellungs-Screens.
 enum class SetItem {
-  Profile, Source, VibThreshold, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
+  Profile, Classifier, Source, VibThreshold, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
   Scale, ScaleSearch, ScaleChoose, ScaleBound, ScaleAutoTare, ScaleTimer, ScaleGrindTare, ScalePortafilter, Grinder,
   Noise, Template, ClearHistory, ResetProfile
 };
@@ -668,6 +670,7 @@ constexpr uint8_t kGainSteps[] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
 int buildItems(SetItem* out) {
   int n = 0;
   out[n++] = SetItem::Profile;
+  out[n++] = SetItem::Classifier;
   if (snap.vibAvailable) {
     out[n++] = SetItem::Source;
     if (snap.vibMode != 0) out[n++] = SetItem::VibThreshold;
@@ -704,6 +707,7 @@ const char* itemLabel(SetItem it) {
   switch (it) {
     case SetItem::Profile:      return "Profil";
     case SetItem::Source:       return "Erkennung";
+    case SetItem::Classifier:   return "KI-Erkennung";
     case SetItem::VibThreshold: return "Vibr.-Schwelle";
     case SetItem::Level:        return "Pegel-Schwelle";
     case SetItem::Similarity:   return "Muster-Schwelle";
@@ -757,6 +761,15 @@ String itemValue(SetItem it) {
       break;
     case SetItem::Source:
       snprintf(buf, sizeof(buf), "%s", vibration::modeName(static_cast<vibration::Mode>(snap.vibMode)));
+      break;
+    case SetItem::Classifier:
+      if (!snap.clsEnabled) {
+        snprintf(buf, sizeof(buf), "aus");
+      } else if (!snap.clsReady) {
+        snprintf(buf, sizeof(buf), "an (untrainiert)");
+      } else {
+        snprintf(buf, sizeof(buf), "an (%.0f %%)", snap.clsAccuracy * 100.0f);
+      }
       break;
     case SetItem::VibThreshold: snprintf(buf, sizeof(buf), "+%.0f dB", snap.vibThresholdDb); break;
     case SetItem::Level:       snprintf(buf, sizeof(buf), "%.0f %%", st.levelThreshold * 100.0f); break;
@@ -817,6 +830,9 @@ void adjustItem(SetItem it, int dir) {
   switch (it) {
     case SetItem::Profile:
       app.cmdSelectSlot((snap.activeSlot + cfg::kProfileSlots + dir) % cfg::kProfileSlots);
+      return;
+    case SetItem::Classifier:
+      app.cmdSetUseClassifier(dir > 0);  // + an, - aus
       return;
     case SetItem::Source:
     case SetItem::VibThreshold: {

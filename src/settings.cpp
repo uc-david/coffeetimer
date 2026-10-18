@@ -329,6 +329,7 @@ constexpr uint32_t kPartVersion = 1;
 constexpr uint32_t kPumpMagic = 0x50544350;   // "PCTP"
 constexpr uint32_t kNoiseMagic = 0x4E544350;  // "PCTN"
 constexpr uint32_t kGrindMagic = 0x47544350;  // "PCTG"
+constexpr uint32_t kTrainMagic = 0x54544350;  // "PCTT" Trainingsdaten des Klassifikators
 
 /// Kopf jeder Teil-Datei: Kennung, Version und Nutzdatengröße (prüft Format).
 struct PartHeader {
@@ -371,6 +372,7 @@ String slotBase(uint8_t slot) { return "/slot" + String(slot + 1); }
 /// Alte Gesamtdatei (bis Firmware mit Format v8) bzw. deren Sicherung.
 String legacyPath(uint8_t slot) { return slotBase(slot) + ".bin"; }
 String legacyBackupPath(uint8_t slot) { return slotBase(slot) + "_old.bin"; }
+String trainPath(uint8_t slot) { return slotBase(slot) + "_train.bin"; }
 
 String partPath(uint8_t slot, uint8_t part) {
   switch (part) {
@@ -440,6 +442,12 @@ void recoverTempFiles() {
       } else if (LittleFS.rename(tmp, path)) {
         Serial.printf("[settings] %s aus temporärer Datei wiederhergestellt\n", path.c_str());
       }
+    }
+    // Trainingsdaten: wie oben
+    const String tp = trainPath(slot), tt = tp + ".tmp";
+    if (LittleFS.exists(tt)) {
+      if (LittleFS.exists(tp)) LittleFS.remove(tt);
+      else LittleFS.rename(tt, tp);
     }
     LittleFS.remove(legacyPath(slot) + ".tmp");  // Rest des alten Formats
   }
@@ -603,7 +611,8 @@ bool deleteSlot(uint8_t slot) {
   if (!fsOk || slot >= cfg::kProfileSlots) return false;
   bool ok = true;
   for (const String& p : {partPath(slot, kPartPump), partPath(slot, kPartNoise),
-                          partPath(slot, kPartGrinders), legacyPath(slot), legacyBackupPath(slot)}) {
+                          partPath(slot, kPartGrinders), trainPath(slot), legacyPath(slot),
+                          legacyBackupPath(slot)}) {
     if (LittleFS.exists(p)) ok = LittleFS.remove(p) && ok;
   }
   return ok;
@@ -635,6 +644,118 @@ bool decodeSlot(const String& in, ProfileSlot& out) {
   if (rc != 0 || !decodeAny(reinterpret_cast<const uint8_t*>(fileBuf), len, out, migrated)) return false;
   sanitize(out);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Trainingsdaten: Kopf (Kennung, Version, Anzahl Aufnahmen), dann je Aufnahme
+// Art, Index, Anzahl Klangbilder und die Klangbilder (int8 × kNumBands).
+// ---------------------------------------------------------------------------
+struct TrainRecordHeader {
+  uint8_t kind;
+  uint8_t index;
+  uint16_t count;
+};
+
+/// Trainingsdaten -> Bytes (Datei-Format). Gemeinsam für Datei und Export.
+void serializeTraining(const classifier::TrainingSet& set, std::vector<uint8_t>& out) {
+  const PartHeader h{kTrainMagic, kPartVersion, static_cast<uint32_t>(set.records.size())};
+  size_t total = sizeof(h);
+  for (const classifier::Record& r : set.records) total += sizeof(TrainRecordHeader) + r.frames.size();
+  out.resize(total);  // > 4 kB -> PSRAM
+  uint8_t* p = out.data();
+  memcpy(p, &h, sizeof(h));
+  p += sizeof(h);
+  for (const classifier::Record& r : set.records) {
+    const TrainRecordHeader rh{static_cast<uint8_t>(r.kind), r.index, static_cast<uint16_t>(r.count())};
+    memcpy(p, &rh, sizeof(rh));
+    p += sizeof(rh);
+    memcpy(p, r.frames.data(), r.frames.size());
+    p += r.frames.size();
+  }
+}
+
+/// Bytes -> Trainingsdaten. Prüft Kennung, Version und jede Längenangabe.
+bool parseTraining(const uint8_t* data, size_t len, classifier::TrainingSet& set) {
+  set.records.clear();
+  PartHeader h{};
+  if (len < sizeof(h)) return false;
+  memcpy(&h, data, sizeof(h));
+  if (h.magic != kTrainMagic || h.version != kPartVersion || h.size > 128) return false;
+  size_t pos = sizeof(h);
+  for (uint32_t i = 0; i < h.size; ++i) {
+    TrainRecordHeader rh{};
+    if (pos + sizeof(rh) > len) return false;
+    memcpy(&rh, data + pos, sizeof(rh));
+    pos += sizeof(rh);
+    const size_t bytes = static_cast<size_t>(rh.count) * cfg::kNumBands;
+    if (rh.kind > 3 || rh.count > classifier::kMaxFramesPerRecord || pos + bytes > len) return false;
+    classifier::Record r;
+    r.kind = static_cast<classifier::Kind>(rh.kind);
+    r.index = rh.index;
+    r.frames.assign(data + pos, data + pos + bytes);
+    pos += bytes;
+    set.records.push_back(std::move(r));
+  }
+  return pos == len;
+}
+
+bool loadTraining(uint8_t slot, classifier::TrainingSet& set) {
+  set.records.clear();
+  if (!fsOk || !LittleFS.exists(trainPath(slot))) return false;
+  File f = LittleFS.open(trainPath(slot), "r");
+  if (!f) return false;
+  std::vector<uint8_t> buf(f.size());
+  const bool read = f.read(buf.data(), buf.size()) == buf.size();
+  f.close();
+  if (!read || !parseTraining(buf.data(), buf.size(), set)) {
+    set.records.clear();
+    Serial.printf("[settings] %s ungültig – Trainingsdaten verworfen\n", trainPath(slot).c_str());
+    return false;
+  }
+  return true;
+}
+
+bool saveTraining(uint8_t slot, const classifier::TrainingSet& set) {
+  if (!fsOk || slot >= cfg::kProfileSlots) return false;
+  std::vector<uint8_t> buf;
+  serializeTraining(set, buf);
+  const String path = trainPath(slot);
+  const String tmp = path + ".tmp";
+  File f = LittleFS.open(tmp, "w");
+  if (!f) return false;
+  const size_t written = f.write(buf.data(), buf.size());
+  f.close();
+  if (written != buf.size()) {
+    LittleFS.remove(tmp);
+    Serial.printf("[settings] FEHLER beim Schreiben von %s\n", path.c_str());
+    return false;
+  }
+  if (LittleFS.rename(tmp, path)) return true;
+  LittleFS.remove(path);
+  return LittleFS.rename(tmp, path);
+}
+
+bool encodeTraining(const classifier::TrainingSet& set, String& out) {
+  std::vector<uint8_t> buf;
+  serializeTraining(set, buf);
+  size_t len = 0;
+  mbedtls_base64_encode(nullptr, 0, &len, buf.data(), buf.size());
+  std::vector<uint8_t> text(len + 1);
+  if (mbedtls_base64_encode(text.data(), text.size(), &len, buf.data(), buf.size()) != 0) return false;
+  text[len] = '\0';
+  out = reinterpret_cast<const char*>(text.data());
+  return true;
+}
+
+bool decodeTraining(const String& in, classifier::TrainingSet& set) {
+  size_t len = 0;
+  mbedtls_base64_decode(nullptr, 0, &len, reinterpret_cast<const uint8_t*>(in.c_str()), in.length());
+  std::vector<uint8_t> buf(len);
+  if (mbedtls_base64_decode(buf.data(), buf.size(), &len, reinterpret_cast<const uint8_t*>(in.c_str()),
+                            in.length()) != 0) {
+    return false;
+  }
+  return parseTraining(buf.data(), len, set);
 }
 
 bool encodePart(const ProfileSlot& in, uint8_t part, String& out) {
@@ -694,6 +815,10 @@ uint8_t loadActiveSlot() {
 }
 
 void saveActiveSlot(uint8_t slot) { prefs.putUChar("slot", slot); }
+
+bool loadUseClassifier() { return prefs.getBool("useCls", false); }
+
+void saveUseClassifier(bool on) { prefs.putBool("useCls", on); }
 
 uint8_t loadMicGain() {
   return constrain(prefs.getUChar("micGain", cfg::kMicGainDefault), cfg::kMicGainMin, cfg::kMicGainMax);

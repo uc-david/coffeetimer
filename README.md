@@ -107,6 +107,27 @@ Einstellbar unter *EINST. → Erkennung* bzw. auf der Webseite:
 (Tasse abstellen) zählen nicht. Die Schwelle lässt sich auf der Webseite anhand eines Live-Balkens einstellen.
 Hinweis: Bei Zweikreisern vibriert auch die Nachfüllpumpe – dann besser *Mikrofon + Vibration*.
 
+**KI-Erkennung (optional):** Ein kleiner Klassifikator (lineare Diskriminanzanalyse), der direkt auf dem Gerät
+trainiert wird. Er lernt aus allen Teach-Aufnahmen eines Profils gemeinsam, *worin* sich Pumpe, Mühlen,
+Störgeräusche und Ruhe unterscheiden, und entscheidet damit, was gerade zu hören ist – statt jedes Geräusch einzeln
+mit seinen Klangmustern zu vergleichen. Pegel, Gleichmäßigkeit und Vibration gelten weiterhin.
+Einschalten unter *Erkennung → KI-Erkennung* (Webseite) bzw. *EINST. → KI-Erkennung*. Trainiert wird automatisch
+nach jedem Teach; dafür speichert jeder Teach bis zu 200 Klangbilder (je Profil in `/slotN_train.bin`). Die
+Webseite zeigt Trainingsstand, Trefferquote und live die erkannte Klasse.
+
+So lernt sie am besten – **je Geräusch 4–5 Aufnahmen**, sie behält je Pumpe, Mühle und Störgeräusch die letzten 5
+(Ruhe: 10), erst die sechste verdrängt die älteste:
+
+| Geräusch | 1. Aufnahme | 2.–5. Aufnahme |
+|---|---|---|
+| Pumpe | **Ersetzen** (verwirft alte Pumpen-Aufnahmen) | **Ergänzen** – z. B. normaler Bezug, Leerbezug |
+| Mühle | **Mühle speichern** | **Ergänzen** (zur ähnlichsten Mühle) – z. B. anderer Mahlgrad, leer gelaufen |
+| Störgeräusch | **Speichern** | **Ergänzen** (zum ähnlichsten Störgeräusch) |
+
+Die KI lernt nur aus diesen Teach-Aufnahmen, nicht aus dem laufenden Betrieb – so kann sie keine eigenen
+Fehlentscheidungen „mitlernen". Die Trainingsdaten sind im Export
+enthalten; beim Import werden sie (Häkchen „KI-Trainingsdaten“) für die gewählten Teile mit übernommen.
+
 Der Timer-Start wird auf den Beginn des Geräuschs zurückdatiert. Als Sicherung stoppt der Timer nach 60 s
 (Standardprofil) bzw. 120 s (eingelernt).
 
@@ -135,8 +156,9 @@ Befehle und das letzte Rohpaket (hilfreich, um weitere Waagen zu unterstützen).
   wechseln auch am Display (*EINST. → Profil*).
 - Gespeichert wird je Profil in **drei getrennten Dateien** (Pumpe + Einstellungen, Mühlen, Störgeräusche).
   Jede Änderung schreibt nur ihre eigene Datei – ein Pumpen-Teach kann z. B. die Mühlen nicht verändern.
-- Der **Export** enthält die drei Teile einzeln; beim **Import** wird per Häkchen gewählt, welche Teile ersetzt
-  werden (z. B. nur die Mühlen aus einem anderen Profil). Exporte älterer Firmware lassen sich weiterhin importieren.
+- Der **Export** enthält die drei Teile und die KI-Trainingsdaten einzeln; beim **Import** wird per Häkchen
+  gewählt, welche Teile ersetzt werden (z. B. nur die Mühlen aus einem anderen Profil) und ob deren
+  KI-Trainingsdaten mitkommen. Exporte älterer Firmware lassen sich weiterhin importieren.
 - Profile älterer Firmware-Versionen werden beim Start automatisch ins aktuelle Format übernommen
   (die alte Datei bleibt als `/slotN_old.bin` auf dem Gerät).
 
@@ -165,6 +187,7 @@ Befehle und das letzte Rohpaket (hilfreich, um weitere Waagen zu unterstützen).
 | `src/audio_features.*` | FFT, Pegel, Bandspektrum, Rhythmus-Kurve |
 | `src/pump_detector.*` | Vergleich mit Pumpe, Mühlen und Störgeräuschen; Entprellung |
 | `src/teach_mode.*` | Teach-Ablauf und Qualitätsbewertung |
+| `src/classifier.*` | KI-Erkennung: auf dem Gerät trainierter Klassifikator (LDA) |
 | `src/vibration.*` | Vibrationserkennung (Beschleunigungssensor) |
 | `src/shot_timer.*` | Timer und Historie |
 | `src/app.*` | Audio-Task, zentrale Logik, Mühlen-Tara, Mutex |

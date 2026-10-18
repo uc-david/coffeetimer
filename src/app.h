@@ -21,6 +21,7 @@
 #include <freertos/semphr.h>
 
 #include "audio_features.h"
+#include "classifier.h"
 #include "pump_detector.h"
 #include "settings.h"
 #include "shot_timer.h"
@@ -115,6 +116,13 @@ struct StatusSnapshot {
   float vibThresholdDb = 8.0f;
   float vibSteadiness = 99.0f;
 
+  // KI-Erkennung
+  bool clsEnabled = false;        ///< eingeschaltet
+  bool clsReady = false;          ///< trainiert (Pumpe + mind. eine weitere Klasse)
+  uint8_t clsClasses = 0;
+  uint32_t clsFrames = 0;         ///< Klangbilder im Training
+  float clsAccuracy = 0.0f;       ///< Trefferquote auf den Trainingsdaten 0..1
+
   // Mikrofon
   uint8_t micGain = cfg::kMicGainDefault;
   float clipRatio = 0.0f;    ///< Übersteuerung (Spitzenwert, klingt langsam ab)
@@ -148,7 +156,7 @@ class App {
   /**
    * Übernimmt das Teach-Ergebnis (Pumpe: Profil, Störgeräusch: Liste ergänzen).
    * @param add   Pumpe: false = Profil ersetzen, true = bestehendes Profil ergänzen;
-   *              Mühle: false = neue Mühle, true = der ähnlichsten Mühle hinzufügen
+   *              Mühle / Störgeräusch: false = neuer Eintrag, true = dem ähnlichsten hinzufügen
    * @param note  optional: erhält einen Hinweistext (bei der Pumpe inkl. geänderter Schwellen)
    * @param keepSettings  Pumpe: bisherige Schwellen behalten statt aus der Aufnahme setzen
    * @return false bei Fehler-Ergebnis
@@ -176,8 +184,9 @@ class App {
   /// Löscht einen Slot (danach Standardprofil).
   bool cmdDeleteSlot(uint8_t slot);
   /// Export als Text (Base64) bzw. Import aus Text in einen Slot.
-  /// Export: jeder Teil (Pumpe+Einstellungen, Mühlen, Störgeräusche) einzeln als Text.
-  bool exportSlot(uint8_t slot, String& name, String& pump, String& grinders, String& noise);
+  /// Export: jeder Teil (Pumpe+Einstellungen, Mühlen, Störgeräusche) und die
+  /// KI-Trainingsdaten einzeln als Text.
+  bool exportSlot(uint8_t slot, String& name, String& pump, String& grinders, String& noise, String& training);
   /// Lesbare Beschreibung eines Slots (Pumpe, Mühlen, Störgeräusche, Schwellen).
   bool slotText(uint8_t slot, String& out);
   /**
@@ -185,9 +194,14 @@ class App {
    * Ziel-Slots bleiben unverändert (ihre Dateien werden nicht geschrieben).
    * @param parts   settings::Part-Bits
    * @param legacy  Export älterer Firmware (alle Teile in einem Block) oder leer
+   * @param training KI-Trainingsdaten aus dem Export (leer = keine übernehmen): es
+   *                 werden nur die Klangbilder der gewählten Teile ersetzt
    */
   bool cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const String& grinders,
-                     const String& noise, const String& legacy);
+                     const String& noise, const String& legacy, const String& training);
+
+  /// KI-Erkennung (Klassifikator) ein-/ausschalten.
+  void cmdSetUseClassifier(bool on);
 
   /// Setzt die Mikrofon-Verstärkung (wird im Audio-Task übernommen).
   void cmdSetMicGain(uint8_t gain);
@@ -252,6 +266,16 @@ class App {
   uint32_t weightTares_ = 0;    ///< Tara-Zähler beim Pumpenstopp (Tara beendet das Nachführen)
   void handleGrinder(const AudioFrame& f);  ///< Dosier-Tara und Dosis (unter Mutex)
   GrinderProfile grinders_;     ///< Mühlen des aktiven Slots (Detektor hält einen Zeiger)
+
+  // KI-Erkennung
+  classifier::TrainingSet training_;   ///< Trainingsdaten des aktiven Slots
+  classifier::Classifier classifier_;  ///< daraus trainiert (Detektor hält einen Zeiger)
+  bool useClassifier_ = false;
+  /// Übernimmt die Klangbilder der letzten Teach-Aufnahme (und ihrer Ruhe-Phase)
+  /// in die Trainingsdaten, speichert sie und trainiert neu.
+  void learnFromTeachLocked(classifier::Kind kind, uint8_t index, bool replaceKind);
+  /// Speichert die Trainingsdaten des aktiven Slots und trainiert neu.
+  void retrainLocked(bool save);
   bool grinderWasOn_ = false;
   float doseG_ = NAN;           ///< zuletzt gewogene Dosis
   uint32_t doseAtMs_ = 0;       ///< Zeitpunkt der Dosis
