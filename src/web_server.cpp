@@ -10,6 +10,9 @@
 #include <Update.h>
 #include <WebServer.h>
 
+#include <memory>
+#include <new>
+
 #include "app.h"
 #include "battery.h"
 #include "net_manager.h"
@@ -51,8 +54,6 @@ void sendOk(bool ok = true, const char* message = nullptr) {
 }
 
 void fillSettings(JsonObject o, const DetectorSettings& s) {
-  o["similarityThreshold"] = s.similarityThreshold;
-  o["periodicityThreshold"] = s.periodicityThreshold;
   o["levelThreshold"] = s.levelThreshold;
   o["onDelayMs"] = s.onDelayMs;
   o["offDelayMs"] = s.offDelayMs;
@@ -68,7 +69,7 @@ void handleRoot() {
 void handleStatus() {
   // Snapshot ist groß (Teach-Ergebnis, Historie) -> statisch statt auf dem Stack.
   static StatusSnapshot s;
-  app.snapshot(s);
+  app().snapshot(s);
 
   JsonDocument doc;
   doc["running"] = s.timerRunning;
@@ -83,12 +84,6 @@ void handleStatus() {
   if (s.grinderOn && s.grinderActive >= 0 && s.grinderActive < s.grinderCount) {
     live["grinderName"] = s.grinderNames[s.grinderActive];
   }
-  live["grinderSim"] = s.detector.scores.grinderSimilarity;
-  live["noiseSim"] = s.detector.scores.noiseSimilarity;
-  live["similarity"] = s.detector.scores.similarity;
-  live["periodicity"] = s.detector.scores.periodicity;
-  live["rhythm"] = s.detector.scores.rhythm;
-  live["periodic"] = s.detector.periodic;
   live["levelRatio"] = s.detector.scores.levelRatio;
   live["rawActive"] = s.detector.rawActive;
   live["rejected"] = s.detector.rejected;
@@ -103,10 +98,7 @@ void handleStatus() {
   prof["bgDb"] = s.profileBgDb;
   prof["pumpDb"] = s.profilePumpDb;
   prof["quality"] = s.profileQuality;
-  prof["templates"] = s.profileTemplates;
   prof["recordings"] = s.profileRecordings;
-  prof["periodHz"] = s.profilePeriodHz;
-  prof["rhythmThreshold"] = s.profileRhythmTh;
   prof["steadyThreshold"] = s.profileSteadyTh;
   prof["noiseCount"] = s.noiseCount;
   prof["maxGrinders"] = cfg::kMaxGrinders;
@@ -142,29 +134,15 @@ void handleStatus() {
     res["clip"] = r.clipRatio;
     res["activeSeconds"] = r.activeSeconds;
     res["longestPauseMs"] = r.longestPauseMs;
-    res["coverage"] = r.coverage;
-    res["falseRatio"] = r.falseRatio;
-    res["selfSimilarity"] = r.selfSimilarity;
-    res["bgSimilarity"] = r.bgSimilarity;
-    res["pumpPeriodicity"] = r.pumpPeriodicity;
-    res["bgPeriodicity"] = r.bgPeriodicity;
-    res["distinctBands"] = r.distinctBands;
-    res["pumpRhythm"] = r.pumpRhythm;
     res["pumpSteadiness"] = r.pumpSteadiness;
     res["steadyThreshold"] = r.profile.steadyThreshold;
-    res["contrastDb"] = r.contrastDb;
-    res["bgRhythm"] = r.bgRhythm;
-    res["rhythmThreshold"] = r.profile.rhythmThreshold;
-    res["rejectedRatio"] = r.rejectedRatio;
-    res["noiseHitBefore"] = r.noiseHitBefore;
-    res["noiseHitAfter"] = r.noiseHitAfter;
+    res["trainFrames"] = r.trainFrames;
+    res["clsReady"] = r.clsReady;
+    res["clsAsPump"] = r.clsAsPump;
     res["grinderMatch"] = r.grinderMatch;
-    res["grinderMatchSim"] = r.grinderMatchSim;
+    res["grinderMatchShare"] = r.grinderMatchShare;
     res["noiseMatch"] = r.noiseMatch;
-    res["templates"] = r.profile.templateCount;
-    res["periodHz"] = r.profile.periodHz();
-    res["suggestedSimilarity"] = r.suggestedSimilarity;
-    res["suggestedPeriodicity"] = r.suggestedPeriodicity;
+    res["noiseMatchShare"] = r.noiseMatchShare;
     res["suggestedOffDelayMs"] = r.suggestedOffDelayMs;
     JsonArray msgs = res["messages"].to<JsonArray>();
     for (uint8_t i = 0; i < r.messageCount; ++i) msgs.add(r.messages[i]);
@@ -208,8 +186,9 @@ void handleStatus() {
   }
 
   JsonObject cls = doc["classifier"].to<JsonObject>();
-  cls["enabled"] = s.clsEnabled;
   cls["ready"] = s.clsReady;
+  cls["pumpKnown"] = s.clsPumpKnown;
+  cls["minProb"] = cfg::kClsMinProb;
   cls["classes"] = s.clsClasses;
   cls["frames"] = s.clsFrames;
   cls["accuracy"] = s.clsAccuracy;
@@ -242,7 +221,7 @@ void handleStatus() {
 
 void handleGetSettings() {
   JsonDocument doc;
-  fillSettings(doc.to<JsonObject>(), app.settings());
+  fillSettings(doc.to<JsonObject>(), app().settings());
   sendJson(doc);
 }
 
@@ -252,15 +231,13 @@ void handlePostSettings() {
     sendOk(false, "Ungültiges JSON");
     return;
   }
-  DetectorSettings ds = app.settings();  // nicht übergebene Felder bleiben erhalten
+  DetectorSettings ds = app().settings();  // nicht übergebene Felder bleiben erhalten
 
-  ds.similarityThreshold = in["similarityThreshold"] | ds.similarityThreshold;
-  ds.periodicityThreshold = in["periodicityThreshold"] | ds.periodicityThreshold;
   ds.levelThreshold = in["levelThreshold"] | ds.levelThreshold;
   ds.onDelayMs = in["onDelayMs"] | ds.onDelayMs;
   ds.offDelayMs = in["offDelayMs"] | ds.offDelayMs;
   ds.minShotSeconds = in["minShotSeconds"] | ds.minShotSeconds;
-  app.cmdApplySettings(ds);
+  app().cmdApplySettings(ds);
   sendOk();
 }
 
@@ -340,7 +317,7 @@ int slotFromBody(JsonDocument& in) {
 void handleProfiles() {
   SlotSummary list[cfg::kProfileSlots];
   uint8_t active = 0;
-  app.slots(list, active);
+  app().slots(list, active);
   JsonDocument doc;
   doc["active"] = active;
   JsonArray arr = doc["slots"].to<JsonArray>();
@@ -350,10 +327,8 @@ void handleProfiles() {
     o["stored"] = s.stored;
     o["isDefault"] = s.isDefault;
     o["recordings"] = s.recordings;
-    o["templates"] = s.templates;
     o["noise"] = s.noiseCount;
     o["grinders"] = s.grinderCount;
-    o["periodHz"] = s.periodHz;
     o["quality"] = s.quality;
   }
   sendJson(doc);
@@ -362,7 +337,7 @@ void handleProfiles() {
 void handleProfileExport() {
   const int slot = server.arg("slot").toInt();
   String name, pump, grinders, noise, training;
-  if (slot < 0 || slot >= (int)cfg::kProfileSlots || !app.exportSlot(slot, name, pump, grinders, noise, training)) {
+  if (slot < 0 || slot >= (int)cfg::kProfileSlots || !app().exportSlot(slot, name, pump, grinders, noise, training)) {
     sendOk(false, "Export fehlgeschlagen");
     return;
   }
@@ -376,15 +351,22 @@ void handleProfileExport() {
   doc["grinders"] = grinders;  // Mühlen
   doc["noise"] = noise;        // Störgeräusche
   doc["training"] = training;  // KI-Trainingsdaten (Klangbilder)
-  String out;
-  serializeJson(doc, out);
+  // In einen eigenen Puffer statt in einen String: Arduino-ESP32 2.x schneidet
+  // beim Vergrößern eines Strings dessen Länge auf 16 Bit ab (String::changeBuffer) –
+  // der Export (~100 kB) würde ab 64 kB von vorne überschrieben.
+  const size_t len = measureJson(doc);
+  std::unique_ptr<char[]> out(new (std::nothrow) char[len + 1]);  // > 4 kB -> PSRAM
+  if (!out) return sendOk(false, "Export fehlgeschlagen (Speicher)");
+  serializeJson(doc, out.get(), len + 1);
   // Dateiname ohne Sonderzeichen
   String file = name;
   for (size_t i = 0; i < file.length(); ++i) {
     if (!isalnum(static_cast<unsigned char>(file[i]))) file.setCharAt(i, '_');
   }
   server.sendHeader("Content-Disposition", "attachment; filename=\"coffeetimer-" + file + ".json\"");
-  server.send(200, "application/json", out);
+  server.setContentLength(len);
+  server.send(200, "application/json", "");  // nur Kopfzeilen
+  server.sendContent(out.get(), len);
 }
 
 void handleWifi() {
@@ -414,10 +396,10 @@ void begin() {
   server.on("/api/settings", HTTP_POST, handlePostSettings);
 
   server.on("/api/teach/start", HTTP_POST, [] {
-    // Body {"mode": "pump" | "noise" | "grinder" | "background"}
+    // Body {"mode": "pump" | "noise" | "grinder"}
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
-    app.cmdStartTeach(TeachController::modeFromName(in["mode"] | "pump"));
+    app().cmdStartTeach(TeachController::modeFromName(in["mode"] | "pump"));
     sendOk();
   });
   // Profil-Slots
@@ -426,31 +408,31 @@ void begin() {
   // Klartext eines Profils (zum Ansehen im Browser)
   server.on("/api/profiles/text", HTTP_GET, [] {
     String text;
-    if (!app.slotText(server.arg("slot").toInt(), text)) return sendOk(false, "Ungültiger Profil-Platz");
+    if (!app().slotText(server.arg("slot").toInt(), text)) return sendOk(false, "Ungültiger Profil-Platz");
     server.send(200, "text/plain; charset=utf-8", text);
   });
   server.on("/api/profiles/select", HTTP_POST, [] {
     JsonDocument in;
     const int slot = slotFromBody(in);
     if (slot < 0) return sendOk(false, "Ungültiger Slot");
-    app.cmdSelectSlot(slot);
+    app().cmdSelectSlot(slot);
     sendOk(true, "Profil gewechselt");
   });
   server.on("/api/profiles/rename", HTTP_POST, [] {
     JsonDocument in;
     const int slot = slotFromBody(in);
-    const bool ok = slot >= 0 && app.cmdRenameSlot(slot, in["name"] | "");
+    const bool ok = slot >= 0 && app().cmdRenameSlot(slot, in["name"] | "");
     sendOk(ok, ok ? "Umbenannt" : "Umbenennen fehlgeschlagen");
   });
   server.on("/api/profiles/delete", HTTP_POST, [] {
     JsonDocument in;
     const int slot = slotFromBody(in);
-    const bool ok = slot >= 0 && app.cmdDeleteSlot(slot);
+    const bool ok = slot >= 0 && app().cmdDeleteSlot(slot);
     sendOk(ok, ok ? "Profil gelöscht – Standardprofil aktiv" : "Löschen fehlgeschlagen");
   });
   server.on("/api/profiles/import", HTTP_POST, [] {
     // Body {"slot": n, "parts": ["pump","grinders","noise"], "pump": "...", "grinders": "...",
-    //       "noise": "..."}  bzw. bei Exporten älterer Firmware "data": "..." (alle Teile)
+    //       "noise": "...", "training": "...", "withTraining": bool}
     JsonDocument in;
     const int slot = slotFromBody(in);
     uint8_t parts = 0;
@@ -461,23 +443,17 @@ void begin() {
       if (name == "noise") parts |= settings::kPartNoise;
     }
     if (!parts) return sendOk(false, "Nichts zum Importieren ausgewählt");
-    const bool ok = slot >= 0 && app.cmdImportSlot(slot, parts, in["pump"] | "", in["grinders"] | "",
-                                                   in["noise"] | "", in["data"] | "",
+    const bool ok = slot >= 0 && app().cmdImportSlot(slot, parts, in["pump"] | "", in["grinders"] | "",
+                                                   in["noise"] | "",
                                                    in["withTraining"] | false ? (in["training"] | "") : "");
     sendOk(ok, ok ? "Import abgeschlossen" : "Import fehlgeschlagen (Datei ungültig oder andere Version)");
   });
-  // Einzelnes Störgeräusch / Klangmuster löschen, Body {"index": n}
+  // Einzelnes Störgeräusch löschen, Body {"index": n}
   server.on("/api/noise/delete", HTTP_POST, [] {
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
-    const bool ok = app.cmdDeleteNoise(in["index"] | 255);
+    const bool ok = app().cmdDeleteNoise(in["index"] | 255);
     sendOk(ok, ok ? "Störgeräusch gelöscht" : "Löschen fehlgeschlagen");
-  });
-  server.on("/api/templates/delete", HTTP_POST, [] {
-    JsonDocument in;
-    deserializeJson(in, server.arg("plain"));
-    const bool ok = app.cmdDeleteTemplate(in["index"] | 255);
-    sendOk(ok, ok ? "Klangmuster gelöscht" : "Nicht möglich (mind. 1 Muster bleibt)");
   });
   // Waage: Einstellungen und Tara
   server.on("/api/scale", HTTP_POST, [] {
@@ -503,13 +479,13 @@ void begin() {
   server.on("/api/grinders/delete", HTTP_POST, [] {
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
-    const bool ok = app.cmdDeleteGrinder(in["index"] | 255);
+    const bool ok = app().cmdDeleteGrinder(in["index"] | 255);
     sendOk(ok, ok ? "Mühle gelöscht" : "Löschen fehlgeschlagen");
   });
   server.on("/api/grinders/rename", HTTP_POST, [] {
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
-    const bool ok = app.cmdRenameGrinder(in["index"] | 255, in["name"] | "");
+    const bool ok = app().cmdRenameGrinder(in["index"] | 255, in["name"] | "");
     sendOk(ok, ok ? "Umbenannt" : "Umbenennen fehlgeschlagen");
   });
   // Waagen suchen / koppeln: Body {"addr": "...", "name": "..."}
@@ -551,40 +527,32 @@ void begin() {
     vibration::setConfig(c);
     sendOk(true, (String("Erkennung: ") + vibration::modeName(vibration::config().mode)).c_str());
   });
-  // KI-Erkennung an/aus: Body {"enabled": bool}
-  server.on("/api/classifier", HTTP_POST, [] {
-    JsonDocument in;
-    if (deserializeJson(in, server.arg("plain"))) return sendOk(false, "Ungültiges JSON");
-    const bool on = in["enabled"] | false;
-    app.cmdSetUseClassifier(on);
-    sendOk(true, on ? "KI-Erkennung eingeschaltet" : "KI-Erkennung ausgeschaltet");
-  });
   server.on("/api/mic", HTTP_POST, [] {
     JsonDocument in;
     if (deserializeJson(in, server.arg("plain"))) return sendOk(false, "Ungültiges JSON");
-    app.cmdSetMicGain(in["gain"] | cfg::kMicGainDefault);
+    app().cmdSetMicGain(in["gain"] | cfg::kMicGainDefault);
     sendOk(true, "Mikrofon-Verstärkung gesetzt");
   });
 
   server.on("/api/diag", HTTP_GET, [] {
     String text;
-    app.diagnosticsText(text);
+    app().diagnosticsText(text);
     server.send(200, "text/plain; charset=utf-8", text);
   });
-  server.on("/api/noise/clear", HTTP_POST, [] { app.cmdClearNoise(); sendOk(true, "Störgeräusche gelöscht"); });
-  server.on("/api/teach/cancel", HTTP_POST, [] { app.cmdCancelTeach(); sendOk(); });
-  server.on("/api/teach/finish", HTTP_POST, [] { app.cmdFinishTeach(); sendOk(); });
+  server.on("/api/noise/clear", HTTP_POST, [] { app().cmdClearNoise(); sendOk(true, "Störgeräusche gelöscht"); });
+  server.on("/api/teach/cancel", HTTP_POST, [] { app().cmdCancelTeach(); sendOk(); });
+  server.on("/api/teach/finish", HTTP_POST, [] { app().cmdFinishTeach(); sendOk(); });
   server.on("/api/teach/save", HTTP_POST, [] {
-    // Body {"mode": "replace" | "add", "keepSettings": bool}
+    // Body {"mode": "replace" | "add"}
     JsonDocument in;
     deserializeJson(in, server.arg("plain"));
     const bool add = strcmp(in["mode"] | "replace", "add") == 0;
     String note;
-    const bool ok = app.cmdSaveTeach(add, &note, in["keepSettings"] | false);
+    const bool ok = app().cmdSaveTeach(add, &note);
     sendOk(ok, ok ? note.c_str() : "Ergebnis fehlerhaft – nicht speicherbar");
   });
-  server.on("/api/timer/reset", HTTP_POST, [] { app.cmdResetTimer(); sendOk(); });
-  server.on("/api/history/clear", HTTP_POST, [] { app.cmdClearHistory(); sendOk(); });
+  server.on("/api/timer/reset", HTTP_POST, [] { app().cmdResetTimer(); sendOk(); });
+  server.on("/api/history/clear", HTTP_POST, [] { app().cmdClearHistory(); sendOk(); });
   server.on("/api/wifi", HTTP_POST, handleWifi);
   server.on("/api/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
 

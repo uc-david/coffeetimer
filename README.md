@@ -42,13 +42,14 @@ versucht die Verbindung im Hintergrund weiter.
 
 1. Gerät nah an die Maschine stellen (die Pumpe sitzt meist unten/hinten) – für die Vibrationserkennung
    **auf** die Maschine, z. B. auf die Tassenablage.
-2. **TEACH → PUMPE:** einen normalen Bezug einlernen.
-3. **TEACH → MÜHLE:** jede Mühle einmal mahlen lassen (für die Mühlen-Tara und damit sie nicht als Pumpe gilt).
+2. **TEACH → PUMPE:** einen normalen Bezug einlernen, danach weitere Varianten **ergänzen** (siehe
+   [Einlernen](#einlernen-teach)).
+3. **TEACH → MÜHLE:** jede Mühle mahlen lassen (für die Mühlen-Tara und damit sie nicht als Pumpe gilt).
 4. Optional **TEACH → STÖRGER.** für weitere Geräusche wie den Milchaufschäumer.
 5. Optional Waage einschalten, Siebträger wiegen und *Mühlen-Tara* aktivieren (siehe [Waage](#waage)).
 
 Ohne Teach arbeitet ein **Standardprofil**: Es erkennt jedes gleichmäßige Geräusch deutlich über dem
-automatisch gemessenen Raumpegel. Das ist nur eine Notlösung – zuverlässig wird es mit dem Teach.
+automatisch gemessenen Raumpegel. Das ist nur eine Notlösung – zuverlässig wird es mit dem Teach (KI).
 
 ## Bedienung am Display
 
@@ -58,30 +59,44 @@ automatisch gemessenen Raumpegel. Das ist nur eine Notlösung – zuverlässig w
 - Große Zahl: der Timer – beim Mahlen automatisch der gemahlene Kaffee. **Antippen** schaltet zwischen Timer und
   Gewicht um; beginnt oder endet das Mahlen bzw. ein Bezug, gilt wieder die Automatik.
 - Waagenzeile mit Gewicht bzw. Zeit und Durchfluss.
-- Messbalken der Erkennung (Pegel, Takt/Rhythmus bzw. Klangmuster, ggf. Vibration).
+- Messbalken der Erkennung (Pegel, KI „klingt nach Pumpe“, ggf. Vibration).
 - **TEACH** · **RESET** · **INFO**
 - **RESET** ohne Waage: Bezugszeit auf 0. Mit verbundener Waage öffnet sich eine Auswahl: **ALLES AUF 0**
   oder einzeln **BEZUGSZEIT** (Zeit am Display), **GEWICHT** (Waage tarieren) und **WAAGEN-ZEIT** (Timer an der
   Waage).
 
-**INFO** zeigt WLAN, Adresse, Profil und Kennwerte; **EMPF − / +** ändert die Empfindlichkeit.
+**INFO** zeigt WLAN, Adresse, Profil, KI-Trainingsstand und Kennwerte; **EMPF − / +** ändert die Empfindlichkeit.
 **EINST.** enthält alle Einstellungen: Zeile antippen, mit **− / +** ändern, unten auf „< Seite >“ blättern.
 Lösch-Aktionen erst nach zweitem Tippen („SICHER?“). Änderungen wirken sofort und werden kurz danach gespeichert.
 
 ## Einlernen (Teach)
 
 Jede Aufnahme beginnt mit **3 s Ruhe** – dabei wird der Hintergrund gemessen. Jedes Geräusch speichert seinen
-eigenen Hintergrund, Pegel, seine eigene Schwelle und die Mikrofon-Verstärkung; spätere Aufnahmen anderer
-Geräusche ändern daran nichts.
+eigenen Hintergrund, Pegel und die Mikrofon-Verstärkung; spätere Aufnahmen anderer Geräusche ändern daran nichts.
+Die Klangbilder der Aufnahme (bis zu 200) und ihrer Ruhe-Phase bekommt die KI als Trainingsdaten.
 
 | Modus | Ablauf | Ergebnis |
 |---|---|---|
-| **Pumpe** | Ruhe → normalen Bezug starten (am besten mit Kaffee) → endet automatisch, wenn die Pumpe 4 s still ist (oder **FERTIG**) | **Ersetzen** oder **Ergänzen** (z. B. Leerbezug + echter Bezug) |
-| **Mühle** | Ruhe → mahlen lassen → ausschalten | **Neue Mühle** oder **Ergänzen** der ähnlichsten Mühle (anderer Mahlgrad, leer gelaufen) |
-| **Störgeräusch** | Ruhe → Gerät einschalten → ausschalten | wird künftig ignoriert |
+| **Pumpe** | Ruhe → Bezug starten → endet automatisch, wenn die Pumpe 4 s still ist (oder **FERTIG**) | **Ersetzen** oder **Ergänzen** |
+| **Mühle** | Ruhe → mahlen lassen → ausschalten | **Neue Mühle** oder **Ergänzen** der Mühle, die die KI darin hört |
+| **Störgeräusch** | Ruhe → Gerät einschalten → ausschalten | **Speichern** oder **Ergänzen**; wird künftig ignoriert |
 
 Die Auswertung bewertet jede Aufnahme (0–100 Punkte, OK / Warnung / Fehler) mit Begründung und Tipps – etwa
-bei Übersteuerung, zu leiser Pumpe oder unruhigem Hintergrund – und setzt passende Schwellen automatisch.
+bei Übersteuerung, zu leiser Pumpe oder unruhigem Hintergrund. Sie zeigt außerdem, was die bisherige KI in der
+Aufnahme hört (z. B. „erkennt 64 % als Pumpe“ – dann lohnt „Ergänzen“). Eine Pause in der Aufnahme
+(Pre-Infusion) verlängert die Ausschaltverzögerung – das wird gemeldet.
+
+So lernt die KI am besten – **je Geräusch 4–5 Aufnahmen**; sie behält je Pumpe, Mühle und Störgeräusch die
+letzten 5 (Ruhe: 10), erst die sechste verdrängt die älteste:
+
+| Geräusch | 1. Aufnahme | 2.–5. Aufnahme |
+|---|---|---|
+| Pumpe | **Ersetzen** (verwirft alte Pumpen-Aufnahmen) | **Ergänzen** – z. B. normaler Bezug, Leerbezug, Rückspülen |
+| Mühle | **Mühle speichern** | **Ergänzen** – z. B. anderer Mahlgrad, leer gelaufen |
+| Störgeräusch | **Speichern** | **Ergänzen** |
+
+Die KI lernt nur aus diesen Teach-Aufnahmen, nicht aus dem laufenden Betrieb – so kann sie keine eigenen
+Fehlentscheidungen „mitlernen“.
 
 ## Erkennung
 
@@ -89,44 +104,26 @@ Einstellbar unter *EINST. → Erkennung* bzw. auf der Webseite:
 
 | Modus | Funktionsweise |
 |---|---|
-| **Mikrofon** | Klang und Rhythmus der Pumpe |
+| **Mikrofon** | Pegel, Gleichmäßigkeit und KI |
 | **Vibration** | Beschleunigungssensor, 400 Messungen/s; CoreS3 muss fest auf der Maschine stehen |
 | **Mikrofon + Vibration** | Start nur, wenn beides passt; läuft die Pumpe, genügt eines (unter Druck wird sie oft leiser) – am zuverlässigsten |
 
-**Mikrofon:** Alle 32 ms wird ein 64-ms-Fenster per FFT ausgewertet:
+**Mikrofon:** Alle 32 ms wird ein 64-ms-Fenster per FFT ausgewertet (40 Frequenzbänder, 80 Hz–7 kHz):
 
-- **Klangmuster** – 40 Frequenzbänder, verglichen wird die Klangfarbe, nicht die Lautstärke
-  (gut für Rotationspumpen).
-- **Takt und Rhythmus** – Vibrationspumpen schlagen im Netztakt (50 Hz). Dieser Rhythmus bleibt auch unter
-  Druck gleich und unterscheidet sie von netzbrummenden Motoren.
-- **Gleichmäßigkeit** – Niesen, Sprechen und Klappern schwanken stärker als eine Pumpe.
-- Klingt ein Geräusch einer **Mühle** oder einem **Störgeräusch** ähnlicher als der Pumpe, wird es ignoriert.
-  Solange eine Mühle läuft (und kurz danach), startet keine Pumpe.
+- **Pegel** – mindestens zwischen Hintergrund und leisem Teil der Pumpe (Pegel-Schwelle, *EMPF − / +*).
+- **Gleichmäßigkeit** – Niesen, Sprechen und Klappern schwanken stärker als eine Pumpe (Grenze aus dem Teach).
+- **KI-Erkennung** – ein kleiner Klassifikator (lineare Diskriminanzanalyse), der direkt auf dem Gerät trainiert
+  wird. Er lernt aus allen Teach-Aufnahmen eines Profils gemeinsam, *worin* sich Pumpe, Mühlen, Störgeräusche und
+  Ruhe in der Klangfarbe unterscheiden, und entscheidet damit, was gerade zu hören ist (Start ab 60 %
+  Wahrscheinlichkeit, halten ab 45 %). Hört sie eine **Mühle** oder ein **Störgeräusch**, wird es ignoriert.
+  Trainiert wird automatisch nach jedem Teach; die Webseite zeigt Trainingsstand, Trefferquote und live die
+  erkannte Klasse.
+- Ist die Pumpe noch nicht eingelernt, genügt ein lautes, gleichmäßiges Geräusch – außer die KI erkennt darin eine
+  gelernte Mühle bzw. ein Störgeräusch.
 
 **Vibration:** Gemessen wird die Vibrationsstärke über einem automatisch nachgeführten Ruhepegel. Kurze Stöße
 (Tasse abstellen) zählen nicht. Die Schwelle lässt sich auf der Webseite anhand eines Live-Balkens einstellen.
 Hinweis: Bei Zweikreisern vibriert auch die Nachfüllpumpe – dann besser *Mikrofon + Vibration*.
-
-**KI-Erkennung (optional):** Ein kleiner Klassifikator (lineare Diskriminanzanalyse), der direkt auf dem Gerät
-trainiert wird. Er lernt aus allen Teach-Aufnahmen eines Profils gemeinsam, *worin* sich Pumpe, Mühlen,
-Störgeräusche und Ruhe unterscheiden, und entscheidet damit, was gerade zu hören ist – statt jedes Geräusch einzeln
-mit seinen Klangmustern zu vergleichen. Pegel, Gleichmäßigkeit und Vibration gelten weiterhin.
-Einschalten unter *Erkennung → KI-Erkennung* (Webseite) bzw. *EINST. → KI-Erkennung*. Trainiert wird automatisch
-nach jedem Teach; dafür speichert jeder Teach bis zu 200 Klangbilder (je Profil in `/slotN_train.bin`). Die
-Webseite zeigt Trainingsstand, Trefferquote und live die erkannte Klasse.
-
-So lernt sie am besten – **je Geräusch 4–5 Aufnahmen**, sie behält je Pumpe, Mühle und Störgeräusch die letzten 5
-(Ruhe: 10), erst die sechste verdrängt die älteste:
-
-| Geräusch | 1. Aufnahme | 2.–5. Aufnahme |
-|---|---|---|
-| Pumpe | **Ersetzen** (verwirft alte Pumpen-Aufnahmen) | **Ergänzen** – z. B. normaler Bezug, Leerbezug |
-| Mühle | **Mühle speichern** | **Ergänzen** (zur ähnlichsten Mühle) – z. B. anderer Mahlgrad, leer gelaufen |
-| Störgeräusch | **Speichern** | **Ergänzen** (zum ähnlichsten Störgeräusch) |
-
-Die KI lernt nur aus diesen Teach-Aufnahmen, nicht aus dem laufenden Betrieb – so kann sie keine eigenen
-Fehlentscheidungen „mitlernen". Die Trainingsdaten sind im Export
-enthalten; beim Import werden sie (Häkchen „KI-Trainingsdaten“) für die gewählten Teile mit übernommen.
 
 Der Timer-Start wird auf den Beginn des Geräuschs zurückdatiert. Als Sicherung stoppt der Timer nach 60 s
 (Standardprofil) bzw. 120 s (eingelernt).
@@ -151,16 +148,16 @@ Befehle und das letzte Rohpaket (hilfreich, um weitere Waagen zu unterstützen).
 
 ## Profile
 
-- **5 Plätze** – jeder speichert Pumpe, Mühlen, Störgeräusche und Schwellen.
+- **5 Plätze** – jeder speichert Pumpe, Mühlen, Störgeräusche, Einstellungen und KI-Trainingsdaten.
 - Wechseln, umbenennen, löschen, **exportieren** (Sicherung als Datei) und **importieren** auf der Webseite;
   wechseln auch am Display (*EINST. → Profil*).
-- Gespeichert wird je Profil in **drei getrennten Dateien** (Pumpe + Einstellungen, Mühlen, Störgeräusche).
-  Jede Änderung schreibt nur ihre eigene Datei – ein Pumpen-Teach kann z. B. die Mühlen nicht verändern.
+- Gespeichert wird je Profil in **getrennten Dateien** (Pumpe + Einstellungen, Mühlen, Störgeräusche,
+  KI-Trainingsdaten). Jede Änderung schreibt nur ihre eigenen Dateien – ein Pumpen-Teach kann z. B. die Mühlen
+  nicht verändern.
 - Der **Export** enthält die drei Teile und die KI-Trainingsdaten einzeln; beim **Import** wird per Häkchen
   gewählt, welche Teile ersetzt werden (z. B. nur die Mühlen aus einem anderen Profil) und ob deren
-  KI-Trainingsdaten mitkommen. Exporte älterer Firmware lassen sich weiterhin importieren.
-- Profile älterer Firmware-Versionen werden beim Start automatisch ins aktuelle Format übernommen
-  (die alte Datei bleibt als `/slotN_old.bin` auf dem Gerät).
+  KI-Trainingsdaten mitkommen.
+- Profile und Exporte von Firmware vor 2.0 (mit Klangmustern) werden nicht gelesen.
 
 ## Firmware-Update über WLAN
 
@@ -184,8 +181,8 @@ Befehle und das letzte Rohpaket (hilfreich, um weitere Waagen zu unterstützen).
 |---|---|
 | `src/main.cpp` | Einstiegspunkt, Modulübersicht |
 | `src/config.h` | feste Parameter (Audio, Teach-Grenzwerte, Netzwerk, Anzeige) |
-| `src/audio_features.*` | FFT, Pegel, Bandspektrum, Rhythmus-Kurve |
-| `src/pump_detector.*` | Vergleich mit Pumpe, Mühlen und Störgeräuschen; Entprellung |
+| `src/audio_features.*` | FFT, Pegel, Bandspektrum |
+| `src/pump_detector.*` | Pegel, Gleichmäßigkeit und KI-Entscheidung; Mühlen-Erkennung; Entprellung |
 | `src/teach_mode.*` | Teach-Ablauf und Qualitätsbewertung |
 | `src/classifier.*` | KI-Erkennung: auf dem Gerät trainierter Klassifikator (LDA) |
 | `src/vibration.*` | Vibrationserkennung (Beschleunigungssensor) |

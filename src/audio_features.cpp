@@ -13,10 +13,6 @@
 namespace {
 constexpr float kPi = 3.14159265358979f;
 constexpr float kEps = 1e-12f;           // verhindert log10(0)
-constexpr float kPreEmphasis = 0.9f;     // Höhenanhebung vor der Hüllkurve
-// Glättung der Hüllkurve: 1 - exp(-2π·500 Hz / 16 kHz) -> Grenzfrequenz ~500 Hz,
-// lässt Takte bis 250 Hz (kMinLag) sauber durch.
-constexpr float kEnvelopeAlpha = 0.18f;
 }  // namespace
 
 void FeatureExtractor::begin() {
@@ -83,47 +79,6 @@ void FeatureExtractor::process(const int16_t* samples, AudioFrame& out) {
     const uint16_t to = bandStart_[b + 1];
     for (uint16_t k = from; k < to; ++k) p += re_[k] * re_[k] + im_[k] * im_[k];
     bandPower[b] = p / static_cast<float>((to - from) * w);
-  }
-
-  // --- Hüllkurve: Rhythmus der Lautstärke statt Wellenform ---------------------
-  // Eine Vibrationspumpe "hämmert" im Netztakt. Unter Druck wird der Klang
-  // jedes Schlags rauschiger und ändert sich, der Rhythmus der Schläge bleibt
-  // aber exakt gleich. Deshalb wird die Autokorrelation der Hüllkurve
-  // (gleichgerichtetes, tiefpassgefiltertes Signal) berechnet.
-  // Die Höhenanhebung (Pre-Emphasis) vorab unterdrückt tieffrequentes Rumpeln.
-  float prev = 0.0f, env = 0.0f, envSum = 0.0f;
-  for (size_t i = 0; i < w; ++i) {
-    const float v = history_[i] - dc;
-    const float hp = v - kPreEmphasis * prev;
-    prev = v;
-    env += kEnvelopeAlpha * (fabsf(hp) - env);  // Tiefpass ~500 Hz
-    re_[i] = env;
-    envSum += env;
-  }
-  const float envMean = envSum / w;
-  for (size_t i = 0; i < w; ++i) {
-    re_[i] -= envMean;  // nur die Schwankung der Hüllkurve zählt
-    im_[i] = 0.0f;
-  }
-
-  // --- Autokorrelation über FFT: ACF = IFFT(|FFT(x)|²) ------------------------
-  // Das Auffüllen mit Nullen auf die doppelte Länge verhindert zyklische Effekte.
-  for (size_t i = w; i < cfg::kAcfFftSize; ++i) re_[i] = im_[i] = 0.0f;
-  fft(cfg::kAcfFftSize);
-  for (size_t k = 0; k < cfg::kAcfFftSize; ++k) {
-    re_[k] = re_[k] * re_[k] + im_[k] * im_[k];
-    im_[k] = 0.0f;
-  }
-  // Das Leistungsspektrum ist reell und symmetrisch -> eine Vorwärts-FFT
-  // liefert (bis auf einen Faktor) dieselbe Autokorrelation wie die inverse.
-  fft(cfg::kAcfFftSize);
-  // Normierung auf r(0), Korrektur der mit k abnehmenden Überlappung und
-  // zeitliche Glättung wie bei den Bändern (beim ersten Frame ungeglättet).
-  const float r0 = re_[0];
-  const float a = primed_ ? cfg::kSmoothing : 1.0f;
-  for (size_t k = 0; k <= cfg::kMaxLag; ++k) {
-    const float r = r0 > kEps ? (re_[k] / r0) * (static_cast<float>(w) / (w - k)) : 0.0f;
-    acf_[k] = a * r + (1.0f - a) * acf_[k];
   }
 
   // --- Zeitliche Glättung (linear, dann in dB) ---------------------------------

@@ -29,8 +29,8 @@
 
 /**
  * Protokoll einer erkannten Pumpenphase (Diagnose): Mittel- und Minimalwerte
- * der Merkmale während die Pumpe als EIN galt. Damit lässt sich z. B.
- * nachvollziehen, warum eine Mühle als Pumpe erkannt wurde.
+ * der Merkmale während die Pumpe als EIN galt (Pegel, Schwankung, KI). Damit
+ * lässt sich z. B. nachvollziehen, warum eine Mühle als Pumpe erkannt wurde.
  */
 struct DetectionEvent {
   uint32_t durationMs = 0;
@@ -46,10 +46,8 @@ struct SlotSummary {
   bool stored = false;        ///< Datei vorhanden (sonst Standardprofil)
   bool isDefault = true;      ///< Standardprofil ohne Teach
   uint8_t recordings = 0;
-  uint8_t templates = 0;
   uint8_t noiseCount = 0;
   uint8_t grinderCount = 0;
-  float periodHz = 0.0f;
   float quality = 0.0f;
 };
 
@@ -64,11 +62,8 @@ struct StatusSnapshot {
   float profileBgDb = 0.0f;
   float profilePumpDb = 0.0f;
   float profileQuality = 0.0f;
-  uint8_t profileTemplates = 0;
   uint8_t profileRecordings = 0;
-  float profilePeriodHz = 0.0f;   ///< 0 = kein Takt
   uint8_t noiseCount = 0;         ///< Anzahl gelernter Störgeräusche
-  float profileRhythmTh = 0.0f;   ///< Schwelle der Rhythmus-Form (aus dem Teach)
   float profileSteadyTh = 0.0f;   ///< max. Pegelschwankung in dB (aus dem Teach)
 
   // Erkennung
@@ -117,8 +112,8 @@ struct StatusSnapshot {
   float vibSteadiness = 99.0f;
 
   // KI-Erkennung
-  bool clsEnabled = false;        ///< eingeschaltet
-  bool clsReady = false;          ///< trainiert (Pumpe + mind. eine weitere Klasse)
+  bool clsReady = false;          ///< trainiert (mind. zwei Klassen, z. B. Pumpe + Ruhe)
+  bool clsPumpKnown = false;      ///< Pumpe ist eingelernt
   uint8_t clsClasses = 0;
   uint32_t clsFrames = 0;         ///< Klangbilder im Training
   float clsAccuracy = 0.0f;       ///< Trefferquote auf den Trainingsdaten 0..1
@@ -157,11 +152,10 @@ class App {
    * Übernimmt das Teach-Ergebnis (Pumpe: Profil, Störgeräusch: Liste ergänzen).
    * @param add   Pumpe: false = Profil ersetzen, true = bestehendes Profil ergänzen;
    *              Mühle / Störgeräusch: false = neuer Eintrag, true = dem ähnlichsten hinzufügen
-   * @param note  optional: erhält einen Hinweistext (bei der Pumpe inkl. geänderter Schwellen)
-   * @param keepSettings  Pumpe: bisherige Schwellen behalten statt aus der Aufnahme setzen
+   * @param note  optional: erhält einen Hinweistext (inkl. geänderter Einstellungen und KI-Ergebnis)
    * @return false bei Fehler-Ergebnis
    */
-  bool cmdSaveTeach(bool add, String* note = nullptr, bool keepSettings = false);
+  bool cmdSaveTeach(bool add, String* note = nullptr);
   /// Erstellt einen Diagnosebericht (Klartext) zum Kopieren/Weitergeben.
   void diagnosticsText(String& out);
 
@@ -172,8 +166,6 @@ class App {
   /// Löscht bzw. benennt eine gelernte Mühle (Index 0..count-1).
   bool cmdDeleteGrinder(uint8_t index);
   bool cmdRenameGrinder(uint8_t index, const String& name);
-  /// Löscht ein einzelnes Klangmuster der Pumpe (das letzte bleibt immer erhalten).
-  bool cmdDeleteTemplate(uint8_t index);
 
   // --- Profil-Slots ----------------------------------------------------------
   /// Kurzinfo aller Slots und aktiver Slot.
@@ -193,15 +185,11 @@ class App {
    * Import ausgewählter Teile in einen Slot. Nicht ausgewählte Teile des
    * Ziel-Slots bleiben unverändert (ihre Dateien werden nicht geschrieben).
    * @param parts   settings::Part-Bits
-   * @param legacy  Export älterer Firmware (alle Teile in einem Block) oder leer
    * @param training KI-Trainingsdaten aus dem Export (leer = keine übernehmen): es
    *                 werden nur die Klangbilder der gewählten Teile ersetzt
    */
   bool cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const String& grinders,
-                     const String& noise, const String& legacy, const String& training);
-
-  /// KI-Erkennung (Klassifikator) ein-/ausschalten.
-  void cmdSetUseClassifier(bool on);
+                     const String& noise, const String& training);
 
   /// Setzt die Mikrofon-Verstärkung (wird im Audio-Task übernommen).
   void cmdSetMicGain(uint8_t gain);
@@ -270,12 +258,13 @@ class App {
   // KI-Erkennung
   classifier::TrainingSet training_;   ///< Trainingsdaten des aktiven Slots
   classifier::Classifier classifier_;  ///< daraus trainiert (Detektor hält einen Zeiger)
-  bool useClassifier_ = false;
   /// Übernimmt die Klangbilder der letzten Teach-Aufnahme (und ihrer Ruhe-Phase)
   /// in die Trainingsdaten, speichert sie und trainiert neu.
   void learnFromTeachLocked(classifier::Kind kind, uint8_t index, bool replaceKind);
-  /// Speichert die Trainingsdaten des aktiven Slots und trainiert neu.
+  /// Speichert die Trainingsdaten des aktiven Slots (save) und trainiert neu.
   void retrainLocked(bool save);
+  /// Klangbilder je Art (Pumpe, Mühle, Störgeräusch, Ruhe) eines Trainingssatzes.
+  static void countFrames(const classifier::TrainingSet& t, size_t (&perKind)[4]);
   bool grinderWasOn_ = false;
   float doseG_ = NAN;           ///< zuletzt gewogene Dosis
   uint32_t doseAtMs_ = 0;       ///< Zeitpunkt der Dosis
@@ -293,5 +282,5 @@ class App {
   String lastNoiseTeach_;
 };
 
-/// Einzige Instanz der Anwendung.
-extern App app;
+/// Einzige Instanz der Anwendung (liegt im PSRAM, beim ersten Aufruf angelegt).
+App& app();

@@ -138,14 +138,12 @@ bool Classifier::train(const TrainingSet& set) {
     }
     return -1;
   };
-  bool hasPump = false;
   for (const Record& r : set.records) {
     if (!r.count() || classOf(r) >= 0 || nc >= kMaxClasses) continue;
     acc[nc] = Acc{r.kind, r.index, {}, 0};
-    hasPump |= r.kind == Kind::Pump;
     ++nc;
   }
-  if (!hasPump || nc < 2) return false;
+  if (nc < 2) return false;
 
   // Klassenmittel
   for (const Record& r : set.records) {
@@ -243,6 +241,13 @@ void Classifier::scores(const float* x, float* out) const {
     for (size_t b = 0; b < B; ++b) s += classes_[c].w[b] * x[b];
     out[c] = s;
   }
+}
+
+bool Classifier::hasKind(Kind k) const {
+  for (size_t c = 0; c < classCount_; ++c) {
+    if (classes_[c].kind == k) return true;
+  }
+  return false;
 }
 
 Result Classifier::pick(const float* score) const {

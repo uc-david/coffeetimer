@@ -5,10 +5,9 @@
  * @brief Kleiner Klassifikator, direkt auf dem Gerät trainiert (lineare
  *        Diskriminanzanalyse, LDA).
  *
- * Die Klangmuster-Erkennung lernt jedes Geräusch für sich. Der Klassifikator
- * lernt dagegen aus ALLEN Aufnahmen eines Profils gemeinsam, worin sie sich
- * unterscheiden (welche Frequenzbänder Pumpe, Mühlen, Störgeräusche und Ruhe
- * trennen) und gewichtet genau diese Bänder.
+ * Der Klassifikator lernt aus ALLEN Teach-Aufnahmen eines Profils gemeinsam,
+ * worin sie sich unterscheiden (welche Frequenzbänder Pumpe, Mühlen,
+ * Störgeräusche und Ruhe trennen) und gewichtet genau diese Bänder.
  *
  * Merkmal je Messfenster: Klangfarbe = 40 Bandpegel minus ihrem Mittelwert
  * (unabhängig von Lautstärke und Mikrofon-Verstärkung).
@@ -73,8 +72,8 @@ struct Result {
 class Classifier {
  public:
   /**
-   * Trainiert aus den Trainingsdaten. Benötigt Pumpe und mindestens eine
-   * weitere Klasse (z. B. Ruhe), sonst bleibt der Klassifikator unbenutzt.
+   * Trainiert aus den Trainingsdaten. Benötigt mindestens zwei Klassen (jeder
+   * Teach liefert sein Geräusch und Ruhe), sonst bleibt er unbenutzt.
    * @return true, wenn einsatzbereit
    */
   bool train(const TrainingSet& set);
@@ -82,6 +81,8 @@ class Classifier {
   bool ready() const { return ready_; }
   size_t classCount() const { return classCount_; }
   size_t frameCount() const { return frames_; }
+  /// Kennt der Klassifikator diese Art (z. B. ist die Pumpe eingelernt)?
+  bool hasKind(Kind k) const;
   /// Anteil der Trainings-Klangbilder, die richtig erkannt werden (0..1).
   float trainingAccuracy() const { return accuracy_; }
 

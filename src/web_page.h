@@ -98,17 +98,9 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       <label><span>Gleichmäßigkeit (Schwankung)</span><span id="stdTxt"></span></label>
       <div class="bar" id="stdBar"><i></i><b></b></div>
     </div>
-    <div class="meter" id="simMeter">
-      <label><span>Klangmuster</span><span id="simTxt"></span></label>
-      <div class="bar" id="simBar"><i></i><b></b></div>
-    </div>
-    <div class="meter" id="perMeter">
-      <label><span>Takt</span><span id="perTxt"></span></label>
-      <div class="bar" id="perBar"><i></i><b></b></div>
-    </div>
-    <div class="meter" id="rhyMeter">
-      <label><span>Rhythmus-Form</span><span id="rhyTxt"></span></label>
-      <div class="bar" id="rhyBar"><i></i><b></b></div>
+    <div class="meter" id="clsMeter">
+      <label><span>KI: klingt nach Pumpe</span><span id="clsTxt"></span></label>
+      <div class="bar" id="clsBar"><i></i><b></b></div>
     </div>
     <div class="row" style="margin-top:14px">
       <button onclick="post('/api/timer/reset')" title="Timer, Gewicht und Timer der Waage auf 0">Reset</button>
@@ -135,8 +127,6 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     </div>
     <div id="teachResult"></div>
     <p class="hint" id="teachHint" style="text-align:left"></p>
-    <div class="field hidden" id="keepThField"><label><span><input type="checkbox" id="keepTh">
-      Bisherige Schwellen beibehalten (sonst passend zur Aufnahme gesetzt)</span></label></div>
     <div class="row">
       <button class="primary hidden" id="finishBtn" onclick="post('/api/teach/finish')">Fertig</button>
       <button class="primary hidden" id="saveBtn" onclick="saveTeach('replace')">Profil speichern</button>
@@ -156,8 +146,9 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
   <!-- Profile ------------------------------------------------------------- -->
   <section class="card">
     <h2>Profile</h2>
-    <small style="color:var(--muted)">Jeder Platz speichert Pumpenprofil, Störgeräusche und Schwellen.
-      Leere Plätze nutzen das Standardprofil (erkennt gleichmäßige laute Geräusche – Teach empfohlen).</small>
+    <small style="color:var(--muted)">Jeder Platz speichert Pumpe (Pegel), Mühlen, Störgeräusche, Einstellungen und
+      die KI-Trainingsdaten. Leere Plätze nutzen das Standardprofil (erkennt gleichmäßige laute Geräusche – Teach
+      empfohlen).</small>
     <table id="slotTable" style="margin-top:8px"></table>
     <div class="field">
       <label>Profil-Datei importieren in Platz
@@ -259,28 +250,16 @@ static const char kWebPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     <h2>Erkennung</h2>
     <div class="kv" id="profileInfo"></div>
     <div class="field" style="margin-top:8px">
-      <label><span><input type="checkbox" id="clsEnabled" onchange="setClassifier()"> KI-Erkennung (Klassifikator)</span>
-        <b id="clsState"></b></label>
+      <label><span>KI-Erkennung</span><b id="clsState"></b></label>
       <div class="kv" id="clsInfo"></div>
       <small>Lernt aus allen Teach-Aufnahmen dieses Profils, worin sich Pumpe, Mühlen, Störgeräusche und Ruhe
-        unterscheiden, und entscheidet damit, was gerade zu hören ist. Pegel, Gleichmäßigkeit und Vibration gelten wie
-        gewohnt. Braucht neue Teach-Aufnahmen (mind. Pumpe); je mehr Geräusche eingelernt sind, desto besser.
-        Ausgeschaltet arbeitet die Erkennung wie bisher über die Klangmuster.</small>
+        unterscheiden, und entscheidet damit, was gerade zu hören ist. Pegel, Gleichmäßigkeit und Vibration kommen
+        dazu. Je Geräusch werden die letzten 5 Aufnahmen behalten; je mehr Geräusche eingelernt sind, desto besser.</small>
     </div>
     <table id="partsList" style="margin-top:8px"></table>
-    <small style="color:var(--muted)">Klangmuster: aus dem Teach gelernte Klangbilder der Pumpe (z. B. Anlauf / voller Druck) –
-      erkannt wird, wenn eines passt. Störgeräusche: eingelernte Geräusche, die ignoriert werden.</small>
+    <small style="color:var(--muted)">Mühlen lösen die Mühlen-Tara aus, Störgeräusche werden ignoriert. Löschen entfernt
+      auch ihre KI-Trainingsdaten.</small>
     <div class="row" style="margin-top:10px"><button id="noiseClearBtn" onclick="clearNoise()">Alle Störgeräusche löschen</button></div>
-    <div class="field" id="simField">
-      <label>Klangmuster-Schwelle <b id="v_sim"></b></label>
-      <input type="range" id="similarityThreshold" min="0.3" max="0.99" step="0.01">
-      <small>Pumpe ohne Takt (Rotationspumpe): Wie ähnlich das Geräusch einem gelernten Klangmuster sein muss. Wird beim Teach automatisch gesetzt.</small>
-    </div>
-    <div class="field" id="perField">
-      <label>Takt-Schwelle <b id="v_per"></b></label>
-      <input type="range" id="periodicityThreshold" min="0.1" max="0.95" step="0.01">
-      <small>Pumpe mit Takt (Vibrationspumpe): Wie deutlich der Takt hörbar sein muss. Wird beim Teach automatisch gesetzt.</small>
-    </div>
     <div class="field">
       <label>Pegel-Schwelle <b id="v_lvl"></b></label>
       <input type="range" id="levelThreshold" min="0.05" max="1" step="0.05">
@@ -483,56 +462,47 @@ function render(s) {
   // Live-Messwerte (Schwellen aus den Einstellungen)
   const lv = s.live, set = s.settings;
   setBar('lvlBar', lv.levelRatio, set.levelThreshold, lv.levelRatio >= set.levelThreshold);
-  setBar('simBar', lv.similarity, set.similarityThreshold, lv.similarity >= set.similarityThreshold);
   $('lvlTxt').textContent = lv.rmsDb.toFixed(1) + ' dBFS';
-  $('simTxt').textContent = Math.round(lv.similarity * 100) + ' %';
-  $('perMeter').classList.toggle('hidden', !lv.periodic);
-  $('simMeter').classList.toggle('hidden', lv.periodic);
-  setBar('perBar', lv.periodicity, set.periodicityThreshold, lv.periodicity >= set.periodicityThreshold);
-  $('perTxt').textContent = Math.round(lv.periodicity * 100) + ' %';
-  $('rhyMeter').classList.toggle('hidden', !lv.periodic);
   // Schwankung 0..6 dB; grün, solange unter der gelernten Grenze
   const sTh = s.profile.steadyThreshold || 3;
   setBar('stdBar', Math.min(lv.steadiness, 6) / 6, sTh / 6, lv.steadiness <= sTh);
   $('stdTxt').textContent = lv.steadiness >= 20 ? '–' : '±' + lv.steadiness.toFixed(1) + ' dB';
-  setBar('rhyBar', Math.max(0, lv.rhythm), s.profile.rhythmThreshold, lv.rhythm >= s.profile.rhythmThreshold);
-  $('rhyTxt').textContent = Math.round(lv.rhythm * 100) + ' %';
+  // KI: Wahrscheinlichkeit "Pumpe", Marke = Schwelle; Text = was gerade erkannt wird
+  const c = s.classifier || {};
+  $('clsMeter').classList.toggle('hidden', !(c.ready && c.pumpKnown));
+  if (c.kind) {
+    setBar('clsBar', c.pump, c.minProb, c.pump >= c.minProb);
+    $('clsTxt').textContent = `${Math.round(c.pump * 100)} %  ·  jetzt: ${clsName(c)} (${Math.round(c.prob * 100)} %)`;
+  }
   document.querySelectorAll('.teachStart').forEach(b => {
     const m = b.dataset.mode;
     b.disabled = s.teach.phase !== 'idle';
   });
-  document.querySelector('.teachStart[data-mode="grinder"]').textContent =
-    grinderNames.length ? `Mühle (${grinderNames.length})` : 'Mühle';
 
   renderTeach(s.teach);
   renderHistory(s.history);
 
   // Profil / Netzwerk
   const p = s.profile;
-  $('profileInfo').innerHTML = p.valid
-    ? `<span>Profil: <b>${p.recordings} Aufnahme(n)</b></span><span>Klangmuster: <b>${p.templates}</b></span>` +
-      `<span>Takt: <b>${p.periodHz > 0 ? p.periodHz.toFixed(0) + ' Hz' : 'keiner'}</b></span>` +
+  $('profileInfo').innerHTML = p.isDefault
+    ? '<span>Pumpe: <b>Standardprofil</b> – Teach empfohlen</span>'
+    : `<span>Pumpe: <b>${p.recordings} Aufnahme(n)</b></span>` +
       `<span>Qualität: <b>${p.quality.toFixed(0)}/100</b></span>` +
       `<span>Hintergrund: <b>${p.bgDb.toFixed(1)} dB</b></span><span>Pumpe (leise): <b>${p.pumpDb.toFixed(1)} dB</b></span>` +
-      `<span>Störgeräusche: <b>${p.noiseCount}</b></span>`
-    : '<span>Profil: <b>keines</b> – Teach-Modus starten</span>';
+      `<span>Max. Schwankung: <b>±${p.steadyThreshold.toFixed(1)} dB</b></span>` +
+      `<span>Störgeräusche: <b>${p.noiseCount}</b></span>`;
   $('noiseClearBtn').disabled = !p.noiseCount;
   renderParts(p);
   // KI-Erkennung
-  const c = s.classifier || {};
-  $('clsEnabled').checked = !!c.enabled;
-  $('clsState').textContent = !c.ready ? 'nicht trainiert' : `trainiert · Trefferquote ${(c.accuracy * 100).toFixed(0)} %`;
+  $('clsState').textContent = !c.ready ? 'noch nicht trainiert' : `trainiert · Trefferquote ${(c.accuracy * 100).toFixed(0)} %`;
   $('clsInfo').innerHTML = c.ready
     ? `<span>Klassen: <b>${c.classes}</b></span><span>Klangbilder: <b>${c.frames}</b></span>` +
-      (c.kind ? `<span>Jetzt: <b>${esc(c.kind)}${c.kind === 'Muehle' || c.kind === 'Stoergeraeusch' ? ' ' + (c.index + 1) : ''}` +
-                ` (${(c.prob * 100).toFixed(0)} %)</b></span>` : '')
-    : '<span>Für das Training Pumpe (und Mühlen/Störgeräusche) neu einlernen.</span>';
+      (c.kind ? `<span>Jetzt: <b>${esc(clsName(c))} (${(c.prob * 100).toFixed(0)} %)</b></span>` : '') +
+      (c.pumpKnown ? '' : '<span>Pumpe noch nicht eingelernt</span>')
+    : '<span>Pumpe (und Mühlen/Störgeräusche) einlernen – jede Aufnahme trainiert die KI.</span>';
   $('netInfo').innerHTML = `<span>Modus: <b>${s.net.ap ? 'Access-Point' : 'WLAN'}</b></span>` +
     `<span>Netz: <b>${esc(s.net.name)}</b></span><span>IP: <b>${esc(s.net.ip)}</b></span>`;
 
-  const periodic = p.valid && p.periodHz > 0;
-  $('perField').classList.toggle('hidden', !periodic);
-  $('simField').classList.toggle('hidden', periodic);
   $('fwVersion').textContent = s.firmware || '–';
   if (!settingsLoaded) { loadSettings(set); settingsLoaded = true; }
 }
@@ -562,31 +532,17 @@ function renderTeach(t) {
     const title = { ok: '✔ Aufnahme OK', warning: '⚠ Aufnahme mit Einschränkungen', error: '✖ Aufnahme nicht verwendbar' }[r.quality];
     const head = `<div class="result ${r.quality}"><h3>${title} – ${r.score}/100</h3>` +
       `<ul>${r.messages.map(m => '<li>' + esc(m) + '</li>').join('')}</ul>`;
-    res.innerHTML = noise ? head +
-      `<details style="margin-top:8px"><summary>Messwerte</summary><div class="kv" style="margin-top:6px">` +
-      `<span>Als Pumpe erkannt vorher: <b>${(r.noiseHitBefore * 100).toFixed(0)} %</b></span>` +
-      `<span>… mit Störgeräusch: <b>${(r.noiseHitAfter * 100).toFixed(0)} %</b></span>` +
-      `<span>Hörbar: <b>${r.activeSeconds.toFixed(1)} s</b></span></div></details></div>`
-    : head + `<details style="margin-top:8px"><summary>Messwerte</summary><div class="kv" style="margin-top:6px">` +
-      `<span>Erkannt: <b>${(r.coverage * 100).toFixed(0)} %</b></span>` +
-      `<span>Fehlalarm Hintergr.: <b>${(r.falseRatio * 100).toFixed(1)} %</b></span>` +
-      `<span>Abstand (leise): <b>${r.snrDb.toFixed(1)} dB</b></span>` +
-      `<span>Pumpe hörbar: <b>${r.activeSeconds.toFixed(1)} s</b></span>` +
-      `<span>Längste Pause: <b>${(r.longestPauseMs / 1000).toFixed(1)} s</b></span>` +
-      `<span>Klangmuster: <b>${r.templates}</b></span>` +
-      `<span>Muster Pumpe/Hintergr.: <b>${(r.selfSimilarity * 100).toFixed(0)} / ${(r.bgSimilarity * 100).toFixed(0)} %</b></span>` +
-      `<span>Takt: <b>${r.periodHz > 0 ? r.periodHz.toFixed(0) + ' Hz' : 'keiner'}</b></span>` +
-      `<span>Takt Pumpe/Hintergr.: <b>${(r.pumpPeriodicity * 100).toFixed(0)} / ${(r.bgPeriodicity * 100).toFixed(0)} %</b></span>` +
-      `<span>Schwankung Pumpe: <b>±${r.pumpSteadiness.toFixed(1)} dB</b> (Grenze ${r.steadyThreshold.toFixed(1)})</span>` +
-      `<span>Klangfarben-Kontrast: <b>${r.contrastDb.toFixed(1)} dB</b></span>` +
-      `<span>Rhythmus Pumpe/Hintergr.: <b>${(r.pumpRhythm * 100).toFixed(0)} / ${(r.bgRhythm * 100).toFixed(0)} %</b></span>` +
-      `<span>Als Störgeräusch verworfen: <b>${(r.rejectedRatio * 100).toFixed(0)} %</b></span>` +
-      `<span>Schwankung Hintergr.: <b>±${r.bgStdDb.toFixed(1)} dB</b></span>` +
-      `<span>Übersteuerung: <b>${(r.clip * 100).toFixed(2)} %</b></span>` +
-      `<span>Markante Bänder: <b>${r.distinctBands}</b></span>` +
-      `<span>→ Muster-Schwelle: <b>${(r.suggestedSimilarity * 100).toFixed(0)} %</b></span>` +
-      `<span>→ Takt-Schwelle: <b>${(r.suggestedPeriodicity * 100).toFixed(0)} %</b></span>` +
-      `<span>→ Ausschaltverz.: <b>${r.suggestedOffDelayMs} ms</b></span></div></details></div>`;
+    const kv = (label, value) => `<span>${label}: <b>${value}</b></span>`;
+    const common = kv('Hörbar', r.activeSeconds.toFixed(1) + ' s') + kv('Abstand (leise)', r.snrDb.toFixed(1) + ' dB') +
+      kv('Schwankung Hintergr.', '±' + r.bgStdDb.toFixed(1) + ' dB') + kv('Übersteuerung', (r.clip * 100).toFixed(2) + ' %') +
+      kv('Klangbilder für die KI', r.trainFrames) +
+      (r.clsReady ? kv('Bisher als Pumpe erkannt', (r.clsAsPump * 100).toFixed(0) + ' %') : '');
+    res.innerHTML = head + `<details style="margin-top:8px"><summary>Messwerte</summary><div class="kv" style="margin-top:6px">` +
+      common + (noise ? '' :
+        kv('Längste Pause', (r.longestPauseMs / 1000).toFixed(1) + ' s') +
+        kv('Schwankung Pumpe', '±' + r.pumpSteadiness.toFixed(1) + ' dB (Grenze ' + r.steadyThreshold.toFixed(1) + ')') +
+        kv('→ Ausschaltverz.', r.suggestedOffDelayMs + ' ms')) +
+      `</div></details></div>`;
   } else {
     res.innerHTML = '';
   }
@@ -606,10 +562,10 @@ function renderTeach(t) {
   $('addBtn').textContent = grinderMode ? `Zu „${match}“ hinzufügen`
     : noiseAdd ? `Zu Störgeräusch ${noiseIdx + 1} hinzufügen` : 'Profil ergänzen';
   $('teachHint').textContent = pumpAdd
-    ? 'Ergänzen: z. B. erst Leerbezug, dann echten Bezug einlernen – beide werden erkannt.'
+    ? 'Ergänzen: z. B. Leerbezug, Rückspülen und normaler Bezug – die KI lernt alle Varianten (je 5 Aufnahmen). ' +
+      'Ersetzen: verwirft die bisherigen Pumpen-Aufnahmen.'
     : grinderAdd ? 'Dieselbe Mühle (z. B. anderer Mahlgrad, leer gelaufen)? Dann hinzufügen – sonst als neue Mühle speichern.'
     : '';
-  $('keepThField').classList.toggle('hidden', !(usable && t.mode === 'pump' && profileValid && !profileDefault));
   $('retryBtn').classList.toggle('hidden', !done);
   $('cancelBtn').textContent = done ? 'Verwerfen' : 'Abbrechen';
 }
@@ -630,8 +586,6 @@ function renderHistory(h) {
 
 // --- Einstellungen ---------------------------------------------------------
 const labels = {
-  similarityThreshold: ['v_sim', v => Math.round(v * 100) + ' %'],
-  periodicityThreshold: ['v_per', v => Math.round(v * 100) + ' %'],
   levelThreshold: ['v_lvl', v => Math.round(v * 100) + ' %'],
   onDelayMs: ['v_on', v => v + ' ms'],
   offDelayMs: ['v_off', v => v + ' ms'],
@@ -647,19 +601,21 @@ function saveSettings() {
   post('/api/settings', body).then(() => toast('Einstellungen gespeichert'));
 }
 function startTeach(mode) { post('/api/teach/start', { mode }); }
-/** Liste der Klangmuster und Störgeräusche mit Löschknöpfen (nur bei Änderung neu aufbauen). */
+/** Name der von der KI erkannten Klasse. */
+function clsName(c) {
+  if (c.kind === 'Muehle') return grinderNames[c.index] || 'Mühle ' + (c.index + 1);
+  if (c.kind === 'Stoergeraeusch') return 'Störgeräusch ' + (c.index + 1);
+  return { Pumpe: 'Pumpe', Ruhe: 'Ruhe' }[c.kind] || c.kind;
+}
+/** Liste der Mühlen und Störgeräusche mit Löschknöpfen (nur bei Änderung neu aufbauen). */
 let partsKey = '';
 function renderParts(p) {
-  const key = `${p.slot}/${p.templates}/${p.noiseCount}/${p.isDefault}/${(p.grinders || []).join('|')}`;
+  const key = `${p.slot}/${p.noiseCount}/${(p.grinders || []).join('|')}`;
   if (key === partsKey) return;
   partsKey = key;
   const btn = (fn, i, enabled) =>
     `<button style="min-width:0;padding:4px 10px" ${enabled ? '' : 'disabled'} onclick="${fn}(${i})">🗑</button>`;
   let rows = '';
-  if (!p.isDefault) {
-    for (let i = 0; i < p.templates; ++i)
-      rows += `<tr><td>Klangmuster ${i + 1}</td><td>${btn('deleteTemplate', i, p.templates > 1)}</td></tr>`;
-  }
   (p.grinders || []).forEach((name, i) => {
     const ren = `<button style="min-width:0;padding:4px 10px" title="Umbenennen" onclick="renameGrinder(${i})">✎</button>`;
     rows += `<tr><td>☕ ${esc(name)}</td><td style="white-space:nowrap">${ren} ${btn('deleteGrinder', i, true)}</td></tr>`;
@@ -667,9 +623,6 @@ function renderParts(p) {
   for (let i = 0; i < p.noiseCount; ++i)
     rows += `<tr><td>Störgeräusch ${i + 1}</td><td>${btn('deleteNoise', i, true)}</td></tr>`;
   $('partsList').innerHTML = rows;
-}
-function deleteTemplate(i) {
-  if (confirm(`Klangmuster ${i + 1} löschen?`)) post('/api/templates/delete', { index: i }).then(loadProfiles);
 }
 function deleteGrinder(i) {
   if (confirm(`„${grinderNames[i]}“ löschen?`)) post('/api/grinders/delete', { index: i });
@@ -689,9 +642,8 @@ async function loadProfiles() {
   try {
     const p = await (await fetch('/api/profiles', { cache: 'no-store' })).json();
     $('slotTable').innerHTML = p.slots.map((s, i) => {
-      const info = s.isDefault ? 'Standardprofil'
-        : `${s.recordings} Teach-Aufnahme(n) · ${s.templates} Klangmuster · ` +
-          `${s.periodHz > 0 ? 'Takt ' + s.periodHz.toFixed(0) + ' Hz' : 'ohne Takt'} · Qualität ${s.quality.toFixed(0)}/100` +
+      const info = (s.isDefault ? 'Pumpe: Standardprofil'
+        : `Pumpe: ${s.recordings} Teach-Aufnahme(n) · Qualität ${s.quality.toFixed(0)}/100`) +
           `${s.noise ? ' · ' + s.noise + ' Störgeräusch(e)' : ''}` +
           `${s.grinders ? ' · ' + s.grinders + ' Mühle(n)' : ''}`;
       const active = i === p.active;
@@ -730,9 +682,7 @@ function readImportFile() {
     try {
       const j = JSON.parse(reader.result);
       if (j.format !== 'coffeetimer-profile') throw 'Format';
-      // Version 2: Teile einzeln; ältere Exporte: alles in "data"
-      const has = j.data ? { pump: true, grinders: true, noise: true }
-                         : { pump: !!j.pump, grinders: !!j.grinders, noise: !!j.noise };
+      const has = { pump: !!j.pump, grinders: !!j.grinders, noise: !!j.noise };
       pendingImport = j;
       for (const [id, key] of [['impPump', 'pump'], ['impGrinders', 'grinders'], ['impNoise', 'noise']]) {
         $(id).checked = has[key];
@@ -740,7 +690,7 @@ function readImportFile() {
       }
       $('impTraining').checked = !!j.training;
       $('impTraining').disabled = !j.training;
-      $('importInfo').textContent = `„${j.name}“ (${j.data ? 'älteres Format' : 'Teile einzeln'}) – was soll übernommen werden?`;
+      $('importInfo').textContent = `„${j.name}“ (Firmware ${j.firmware || '?'}) – was soll übernommen werden?`;
       $('importParts').classList.remove('hidden');
     } catch (e) { toast('Keine gültige Profil-Datei'); }
   };
@@ -755,7 +705,7 @@ function importProfile() {
   if (!parts.length) { toast('Nichts ausgewählt'); return; }
   const names = { pump: 'Pumpe', grinders: 'Mühlen', noise: 'Störgeräusche' };
   if (!confirm(`In Platz ${slot + 1} ersetzen: ${parts.map(p => names[p]).join(', ')}?\nAlles andere bleibt unverändert.`)) return;
-  slotAction('import', slot, { parts, pump: j.pump, grinders: j.grinders, noise: j.noise, data: j.data,
+  slotAction('import', slot, { parts, pump: j.pump, grinders: j.grinders, noise: j.noise,
                                training: j.training, withTraining: $('impTraining').checked });
   $('importParts').classList.add('hidden');
   $('importFile').value = '';
@@ -808,12 +758,11 @@ $('vibTh').addEventListener('input', updateVibLabel);
 function saveVib() {
   post('/api/vibration', { mode: parseInt($('vibMode').value), thresholdDb: parseFloat($('vibTh').value) });
 }
-function setClassifier() { post('/api/classifier', { enabled: $('clsEnabled').checked }); }
 function saveMic() { post('/api/mic', { gain: parseInt($('micGain').value) }); }
 
 function saveTeach(mode) {
-  // Schwellen werden beim Speichern ggf. angepasst -> Formular neu laden
-  post('/api/teach/save', { mode, keepSettings: $('keepTh').checked }).then(() => { settingsLoaded = false; });
+  // Ausschaltverzögerung wird beim Speichern ggf. verlängert -> Formular neu laden
+  post('/api/teach/save', { mode }).then(() => { settingsLoaded = false; });
 }
 async function loadDiag() {
   try { $('diagText').value = await (await fetch('/api/diag', { cache: 'no-store' })).text(); }

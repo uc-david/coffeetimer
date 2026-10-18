@@ -9,16 +9,17 @@
  *   GET  /api/status        kompletter Zustand als JSON (wird ~4x/s abgefragt)
  *   GET  /api/settings      Erkennungseinstellungen
  *   POST /api/settings      Erkennungseinstellungen setzen   (JSON-Body)
- *   POST /api/teach/start   Teach-Modus starten, Body {"mode":"pump"|"noise"}
+ *   POST /api/teach/start   Teach-Modus starten, Body {"mode":"pump"|"grinder"|"noise"}
  *   POST /api/teach/finish  Pumpenaufnahme vorzeitig beenden ("Fertig")
  *   POST /api/teach/cancel  Teach-Modus abbrechen / verwerfen
  *   POST /api/teach/save    Teach-Ergebnis übernehmen, Body {"mode":"replace"|"add"}
  *   POST /api/noise/clear   gelernte Störgeräusche löschen
  *   POST /api/noise/delete  einzelnes Störgeräusch löschen, Body {"index": n}
- *   POST /api/templates/delete  einzelnes Klangmuster löschen, Body {"index": n}
+ *   POST /api/grinders/delete|rename  Mühle löschen / umbenennen, Body {"index": n, "name": "..."}
  *   GET  /api/profiles      Liste der Profil-Slots
  *   POST /api/profiles/select|rename|delete|import   Body {"slot": n, ...}
- *   GET  /api/profiles/export?slot=n   Profil als Datei (JSON)
+ *   GET  /api/profiles/export?slot=n   Profil als Datei (JSON, inkl. KI-Trainingsdaten)
+ *   GET  /api/profiles/text?slot=n     Profil als Klartext
  *   POST /api/scale         Waage, Body {"enabled","autoTare","syncTimer"} (bool)
  *   POST /api/scale/tare    Waage tarieren
  *   POST /api/mic           Mikrofon-Verstärkung, Body {"gain": 1..64}

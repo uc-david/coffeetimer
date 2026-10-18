@@ -16,7 +16,7 @@
 namespace cfg {
 
 /// Firmware-Version (wird auf Webseite und Info-Screen angezeigt).
-constexpr const char* kFirmwareVersion = "1.5 (" __DATE__ ")";
+constexpr const char* kFirmwareVersion = "2.0 (" __DATE__ ")";
 
 // ---------------------------------------------------------------------------
 // Audio-Erfassung und Merkmale
@@ -35,29 +35,13 @@ constexpr size_t kFrameSize = 512;
 /// deren Pulsieren heraus.
 constexpr size_t kWindowSize = 1024;
 
-/// FFT-Länge für die Autokorrelation (Fenster mit Nullen aufgefüllt, damit
-/// die Korrelation nicht zyklisch "herumläuft").
-constexpr size_t kAcfFftSize = 2048;
-
-/// Bereich der Autokorrelation, in dem nach dem Pumpentakt gesucht wird.
-/// 64 Samples = 250 Hz ... 512 Samples = 31 Hz (deckt 50/60/100/120 Hz ab).
-/// Kürzere Verschiebungen würden eher Gehäuse-Resonanzen finden, die sich
-/// unter Last verschieben – der Pumpentakt selbst bleibt dagegen stabil.
-constexpr size_t kMinLag = 64;
-constexpr size_t kMaxLag = 512;
-constexpr size_t kAcfLen = kMaxLag - kMinLag + 1;
-
-/// Toleranz der Taktlänge bei der Erkennung (Drehzahl einer Rotationspumpe
-/// sinkt unter Last leicht).
-constexpr float kLagTolerance = 0.03f;
-
-/// Glättungsfaktor (exponentieller Mittelwert) für Pegel und Rhythmus-Kurve.
+/// Glättungsfaktor (exponentieller Mittelwert) für den Pegel.
 /// 1.0 = keine Glättung; 0.5 ≈ Mittel über ~2 Schritte.
 constexpr float kSmoothing = 0.5f;
 
-/// Glättung der Frequenzbänder (Klangmuster): 0.25 ≈ Mittel über ~4 Schritte
-/// (~130 ms). Ein einzelnes 64-ms-Fenster eines rauschartigen Geräuschs streut
-/// je Band um mehrere dB – gemittelt wird das Muster deutlich trennschärfer.
+/// Glättung der Frequenzbänder (Klangfarbe für die KI): 0.25 ≈ Mittel über ~4
+/// Schritte (~130 ms). Ein einzelnes 64-ms-Fenster eines rauschartigen Geräuschs
+/// streut je Band um mehrere dB – gemittelt wird die Klangfarbe deutlich trennschärfer.
 constexpr float kBandSmoothing = 0.25f;
 
 /// Gleichmäßigkeit: Pegelschwankung wird über so viele Frames (≈0,5 s) der
@@ -66,8 +50,8 @@ constexpr size_t kSteadyFrames = 16;
 /// ... und erst ab so vielen Frames (≈0,25 s) bewertet.
 constexpr size_t kSteadyMinFrames = 8;
 
-/// Anzahl der logarithmisch verteilten Frequenzbänder des "Fingerabdrucks"
-/// (40 Bänder ≈ Drittel-Terz-Auflösung; bis Firmware 1.5: 24, wird beim Laden umgerechnet).
+/// Anzahl der logarithmisch verteilten Frequenzbänder der Klangfarbe
+/// (40 Bänder ≈ Drittel-Terz-Auflösung).
 constexpr size_t kNumBands = 40;
 
 /// Untere / obere Grenze des ausgewerteten Frequenzbereichs in Hz.
@@ -84,15 +68,6 @@ constexpr uint32_t kWarmupFrames = 30;
 // Profil
 // ---------------------------------------------------------------------------
 
-/// Maximale Anzahl Klangmuster im Profil (z. B. Leerbezug + echter Bezug).
-constexpr size_t kMaxTemplates = 8;
-
-/// Klangmuster je Teach-Aufnahme (z. B. Anlauf / Druckaufbau / voller Druck).
-constexpr size_t kTemplatesPerTeach = 4;
-
-/// Muster, die sich ähnlicher sind als dieser Wert, werden zusammengefasst.
-constexpr float kTemplateMergeSimilarity = 0.97f;
-
 /// Anzahl der Profil-Speicherplätze (z. B. verschiedene Maschinen / Orte).
 constexpr size_t kProfileSlots = 5;
 
@@ -102,8 +77,8 @@ constexpr uint8_t kMicGainMin = 1;
 constexpr uint8_t kMicGainMax = 64;
 
 /// Standardprofil (ohne Teach): Erkannt wird jedes gleichmäßige Geräusch
-/// deutlich über dem automatisch gemessenen Raumpegel – ein Teach macht die
-/// Erkennung spezifisch. Startwerte (Verstärkung 16), danach automatisch:
+/// deutlich über dem automatisch gemessenen Raumpegel – ein Teach (KI) macht
+/// die Erkennung spezifisch. Startwerte (Verstärkung 16), danach automatisch:
 constexpr float kDefaultBgDb = -67.0f;
 constexpr float kDefaultPumpDb = -46.0f;
 /// Abstand Pumpe – Hintergrund, auf den die Pegel-Schwelle bezogen wird
@@ -121,16 +96,11 @@ constexpr float kAutoBgFall = 0.2f;
 constexpr uint32_t kMaxPumpMsDefault = 60000;  ///< Standardprofil
 constexpr uint32_t kMaxPumpMsLearned = 120000; ///< gelerntes Profil
 
-/// Maximale Anzahl gelernter Störgeräusche (z. B. Mühle, Milchaufschäumer).
+/// Maximale Anzahl gelernter Störgeräusche (z. B. Milchaufschäumer).
 constexpr size_t kMaxNoises = 3;
 
 /// Maximale Anzahl gelernter Mühlen (eigene Liste, getrennt von den Störgeräuschen).
 constexpr size_t kMaxGrinders = 3;
-
-/// Klangmuster je Störgeräusch (Platz für Ergänzungen, z. B. Mühle leer / mit Bohnen) ...
-constexpr size_t kNoiseTemplates = 4;
-/// ... davon je Teach-Aufnahme.
-constexpr size_t kNoiseTemplatesPerTeach = 3;
 
 // ---------------------------------------------------------------------------
 // Teach-Modus
@@ -181,13 +151,6 @@ constexpr float kQualMinSnrDb       = 6.0f;   ///< leiser Teil der Pumpe vs. Hin
 constexpr float kQualGoodSnrDb      = 10.0f;  ///< darunter: Warnung
 constexpr float kQualMaxClipRatio   = 0.005f; ///< max. Anteil übersteuerter Samples
 constexpr float kQualBgStdWarnDb    = 4.0f;   ///< Hintergrund zu unruhig
-constexpr float kQualCoverageErr    = 0.70f;  ///< erkannter Anteil der Aufnahme: Fehler
-constexpr float kQualCoverageWarn   = 0.90f;  ///< erkannter Anteil der Aufnahme: Warnung
-constexpr float kQualMaxFalseRatio  = 0.03f;  ///< Hintergrund-Frames, die auslösen würden
-constexpr float kQualDistinctBandDb = 6.0f;   ///< "markantes" Band: so viel über Hintergrund
-constexpr float kQualMinPeriodicity = 0.25f;  ///< Takt gilt als ausgeprägt ab ...
-constexpr float kQualMinPeriodicGap = 0.10f;  ///< ... und Abstand zum Hintergrund
-constexpr float kQualMaxNoiseHit    = 0.05f;  ///< Störgeräusch darf höchstens so oft auslösen
 
 // ---------------------------------------------------------------------------
 // Timer / Historie
@@ -201,6 +164,11 @@ constexpr uint32_t kWeightSettleMs = 4000;
 constexpr float kMinDoseG = 3.0f;
 /// ... und wird höchstens so lange danach dem nächsten Bezug zugeordnet.
 constexpr uint32_t kDoseValidMs = 15 * 60 * 1000;
+
+/// KI-Erkennung: Mindest-Wahrscheinlichkeit der erkannten Klasse für den Start
+/// und – solange sie schon gilt – zum Halten (Hysterese).
+constexpr float kClsMinProb = 0.6f;
+constexpr float kClsHoldProb = 0.45f;
 
 /// KI-Erkennung: so viele Teach-Aufnahmen behält der Klassifikator je Pumpe,
 /// Mühle und Störgeräusch (bzw. Ruhe-Phasen) – erst darüber fällt die älteste weg.

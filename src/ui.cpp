@@ -389,8 +389,7 @@ void drawMain() {
   canvas.setFont(kFontSmall);
   canvas.setTextColor(kColMuted);
   canvas.setTextDatum(textdatum_t::middle_left);
-  // Balken: Pegel und die für diese Pumpe maßgeblichen Kriterien
-  // (Takt + Rhythmus-Form bei Vibrationspumpe, Klangmuster bei Rotationspumpe).
+  // Balken: Pegel, KI ("klingt nach Pumpe") und ggf. Vibration.
   // Grün = Kriterium erfüllt; weiße Marke = Schwelle.
   struct Meter { const char* label; float value; float threshold; };
   const FrameScores& sc = d.scores;
@@ -400,12 +399,7 @@ void drawMain() {
   const bool useVib = snap.vibMode != static_cast<uint8_t>(vibration::Mode::Mic) && snap.vibAvailable;
   if (useMic) {
     meters[count++] = {"Pegel", sc.levelRatio, st.levelThreshold};
-    if (d.periodic) {
-      meters[count++] = {"Takt", sc.periodicity, st.periodicityThreshold};
-      if (!useVib) meters[count++] = {"Rhythmus", sc.rhythm, snap.profileRhythmTh};
-    } else {
-      meters[count++] = {"Muster", sc.similarity, st.similarityThreshold};
-    }
+    if (sc.clsActive && sc.clsPumpKnown) meters[count++] = {"KI Pumpe", sc.clsPump, cfg::kClsMinProb};
   }
   if (useVib) {
     // Vibration über dem Ruhepegel; Marke = Schwelle (Mitte des Balkens)
@@ -567,9 +561,7 @@ void drawTeachSelect() {
   canvas.drawString("Was soll gelernt werden?", 8, 34);
 
   drawTile(btnLearnPump, "Ruhe + Bezug");
-  char grinderInfo[24];
-  snprintf(grinderInfo, sizeof(grinderInfo), "%u gelernt", snap.grinderCount);
-  drawTile(btnLearnGrinder, snap.grinderCount ? grinderInfo : "mahlen lassen");
+  drawTile(btnLearnGrinder, "mahlen lassen");
   drawTile(btnLearnNoise, "z. B. Milch");
 
   canvas.setFont(kFontSmall);
@@ -602,14 +594,14 @@ void drawInfo() {
   if (snap.profileDefault) {
     line("Pumpe", "Standard (ohne Teach)", kColWarn);
   } else {
-    if (snap.profilePeriodHz > 0.0f) {
-      snprintf(buf, sizeof(buf), "Takt %.0f Hz, Q %.0f, %u Muster", snap.profilePeriodHz,
-               snap.profileQuality, snap.profileTemplates);
-    } else {
-      snprintf(buf, sizeof(buf), "ohne Takt, Q %.0f, %u Muster", snap.profileQuality,
-               snap.profileTemplates);
-    }
+    snprintf(buf, sizeof(buf), "%u Aufnahme(n), Q %.0f", snap.profileRecordings, snap.profileQuality);
     line("Pumpe", buf);
+  }
+  if (snap.clsReady) {
+    snprintf(buf, sizeof(buf), "%u Klassen, %.0f %% richtig", snap.clsClasses, snap.clsAccuracy * 100.0f);
+    line("KI", buf, kColOk);
+  } else {
+    line("KI", "noch nicht trainiert", kColWarn);
   }
 
   snprintf(buf, sizeof(buf), "Störger. %u  |  Mikro %ux%s", snap.noiseCount, snap.micGain,
@@ -617,12 +609,6 @@ void drawInfo() {
   line("Sonst.", buf, snap.clipRatio > 0.001f ? kColErr : kColText);
   snprintf(buf, sizeof(buf), "%.0f %%  (Pegel-Schwelle)", snap.settings.levelThreshold * 100.0f);
   line("Empfindl.", buf);
-  if (snap.profilePeriodHz > 0.0f) {
-    snprintf(buf, sizeof(buf), "Takt %.0f %%", snap.settings.periodicityThreshold * 100.0f);
-  } else {
-    snprintf(buf, sizeof(buf), "Muster %.0f %%", snap.settings.similarityThreshold * 100.0f);
-  }
-  line("Schwelle", buf);
   snprintf(buf, sizeof(buf), "Ein %u ms / Aus %u ms", snap.settings.onDelayMs, snap.settings.offDelayMs);
   line("Verzög.", buf);
 
@@ -638,16 +624,16 @@ void drawInfo() {
 
 /// Einträge des Einstellungs-Screens.
 enum class SetItem {
-  Profile, Classifier, Source, VibThreshold, Level, Similarity, Periodicity, OnDelay, OffDelay, MinShot, MicGain,
-  Scale, ScaleSearch, ScaleChoose, ScaleBound, ScaleAutoTare, ScaleTimer, ScaleGrindTare, ScalePortafilter, Grinder,
-  Noise, Template, ClearHistory, ResetProfile
+  Profile, Source, VibThreshold, Level, OnDelay, OffDelay, MinShot, MicGain, Scale, ScaleSearch, ScaleChoose,
+  ScaleBound, ScaleAutoTare, ScaleTimer, ScaleGrindTare, ScalePortafilter, Grinder, Noise, ClearHistory,
+  ResetProfile
 };
 
 constexpr int kSetRowY = 30;                                ///< erste Zeile
 constexpr int kSetRowH = 22;                                ///< Zeilenhöhe
 constexpr int kSetRows = 7;                                 ///< Zeilen je Seite
 constexpr int kSetPagerY = kSetRowY + kSetRows * kSetRowH;  ///< Blätter-Leiste
-constexpr int kMaxSetItems = 26;
+constexpr int kMaxSetItems = 24;
 
 Button btnMinus  {  4, kBtnY, 75, kBtnH, "-",       kColLine,   kColText, true};
 Button btnPlus   { 83, kBtnY, 75, kBtnH, "+",       kColLine,   kColText, true};
@@ -659,28 +645,21 @@ int setPage = 0;              ///< aktuelle Seite
 uint8_t noiseSel = 0;         ///< gewähltes Störgeräusch (zum Löschen)
 uint8_t grinderSel = 0;       ///< gewählte Mühle (zum Löschen)
 uint8_t scaleSel = 0;         ///< gewählte Waage aus der Suche (zum Koppeln)
-uint8_t templateSel = 0;      ///< gewähltes Klangmuster (zum Löschen)
 SetItem confirmItem = SetItem::Profile;
 uint32_t confirmUntil = 0;    ///< Löschen erst nach zweitem Tippen bis zu diesem Zeitpunkt
 
 /// Stufen der Mikrofon-Verstärkung (feiner im unteren Bereich).
 constexpr uint8_t kGainSteps[] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
 
-/// Sichtbare Einträge – abhängig vom Profil (z. B. Takt nur bei Pumpe mit Takt).
+/// Sichtbare Einträge – abhängig von Sensor, Waage und gelernten Geräuschen.
 int buildItems(SetItem* out) {
   int n = 0;
   out[n++] = SetItem::Profile;
-  out[n++] = SetItem::Classifier;
   if (snap.vibAvailable) {
     out[n++] = SetItem::Source;
     if (snap.vibMode != 0) out[n++] = SetItem::VibThreshold;
   }
   out[n++] = SetItem::Level;
-  if (snap.profilePeriodHz > 0.0f) {
-    out[n++] = SetItem::Periodicity;
-  } else if (!snap.profileDefault) {
-    out[n++] = SetItem::Similarity;
-  }
   out[n++] = SetItem::OnDelay;
   out[n++] = SetItem::OffDelay;
   out[n++] = SetItem::MinShot;
@@ -697,7 +676,6 @@ int buildItems(SetItem* out) {
   }
   if (snap.grinderCount > 0) out[n++] = SetItem::Grinder;
   if (snap.noiseCount > 0) out[n++] = SetItem::Noise;
-  if (!snap.profileDefault && snap.profileTemplates > 1) out[n++] = SetItem::Template;
   out[n++] = SetItem::ClearHistory;
   out[n++] = SetItem::ResetProfile;
   return n;
@@ -707,11 +685,8 @@ const char* itemLabel(SetItem it) {
   switch (it) {
     case SetItem::Profile:      return "Profil";
     case SetItem::Source:       return "Erkennung";
-    case SetItem::Classifier:   return "KI-Erkennung";
     case SetItem::VibThreshold: return "Vibr.-Schwelle";
     case SetItem::Level:        return "Pegel-Schwelle";
-    case SetItem::Similarity:   return "Muster-Schwelle";
-    case SetItem::Periodicity:  return "Takt-Schwelle";
     case SetItem::OnDelay:      return "Einschaltverz.";
     case SetItem::OffDelay:     return "Ausschaltverz.";
     case SetItem::MinShot:      return "Mindestdauer";
@@ -726,7 +701,6 @@ const char* itemLabel(SetItem it) {
     case SetItem::ScaleBound:   return "Gekoppelt";
     case SetItem::Grinder:      return "Mühle";
     case SetItem::Noise:        return "Störgeräusch";
-    case SetItem::Template:     return "Klangmuster";
     case SetItem::ClearHistory: return "Historie";
     case SetItem::ResetProfile: return "Profil zurücks.";
   }
@@ -741,7 +715,7 @@ bool hasValue(SetItem it) {
 
 /// Eintrag hat eine Aktion (Löschen/Zurücksetzen)?
 bool hasAction(SetItem it) {
-  return it == SetItem::Noise || it == SetItem::Grinder || it == SetItem::Template || it == SetItem::ClearHistory ||
+  return it == SetItem::Noise || it == SetItem::Grinder || it == SetItem::ClearHistory ||
          it == SetItem::ResetProfile || it == SetItem::ScalePortafilter || it == SetItem::ScaleSearch ||
          it == SetItem::ScaleChoose || (it == SetItem::ScaleBound && scale::config().boundAddr[0]);
 }
@@ -762,19 +736,8 @@ String itemValue(SetItem it) {
     case SetItem::Source:
       snprintf(buf, sizeof(buf), "%s", vibration::modeName(static_cast<vibration::Mode>(snap.vibMode)));
       break;
-    case SetItem::Classifier:
-      if (!snap.clsEnabled) {
-        snprintf(buf, sizeof(buf), "aus");
-      } else if (!snap.clsReady) {
-        snprintf(buf, sizeof(buf), "an (untrainiert)");
-      } else {
-        snprintf(buf, sizeof(buf), "an (%.0f %%)", snap.clsAccuracy * 100.0f);
-      }
-      break;
     case SetItem::VibThreshold: snprintf(buf, sizeof(buf), "+%.0f dB", snap.vibThresholdDb); break;
     case SetItem::Level:       snprintf(buf, sizeof(buf), "%.0f %%", st.levelThreshold * 100.0f); break;
-    case SetItem::Similarity:  snprintf(buf, sizeof(buf), "%.0f %%", st.similarityThreshold * 100.0f); break;
-    case SetItem::Periodicity: snprintf(buf, sizeof(buf), "%.0f %%", st.periodicityThreshold * 100.0f); break;
     case SetItem::OnDelay:     snprintf(buf, sizeof(buf), "%u ms", st.onDelayMs); break;
     case SetItem::OffDelay:    snprintf(buf, sizeof(buf), "%.1f s", st.offDelayMs / 1000.0f); break;
     case SetItem::MinShot:     snprintf(buf, sizeof(buf), "%.0f s", st.minShotSeconds); break;
@@ -815,9 +778,6 @@ String itemValue(SetItem it) {
                snap.grinderCount);
       break;
     case SetItem::Noise:       snprintf(buf, sizeof(buf), "%u von %u", noiseSel + 1, snap.noiseCount); break;
-    case SetItem::Template:
-      snprintf(buf, sizeof(buf), "%u von %u", templateSel + 1, snap.profileTemplates);
-      break;
     case SetItem::ClearHistory: snprintf(buf, sizeof(buf), "%u Einträge", (unsigned)snap.historyCount); break;
     case SetItem::ResetProfile: snprintf(buf, sizeof(buf), snap.profileDefault ? "Standard" : "gelernt"); break;
   }
@@ -826,13 +786,10 @@ String itemValue(SetItem it) {
 
 /// Wert eines Eintrags um eine Stufe ändern (dir = -1 / +1).
 void adjustItem(SetItem it, int dir) {
-  DetectorSettings s = app.settings();
+  DetectorSettings s = app().settings();
   switch (it) {
     case SetItem::Profile:
-      app.cmdSelectSlot((snap.activeSlot + cfg::kProfileSlots + dir) % cfg::kProfileSlots);
-      return;
-    case SetItem::Classifier:
-      app.cmdSetUseClassifier(dir > 0);  // + an, - aus
+      app().cmdSelectSlot((snap.activeSlot + cfg::kProfileSlots + dir) % cfg::kProfileSlots);
       return;
     case SetItem::Source:
     case SetItem::VibThreshold: {
@@ -846,8 +803,6 @@ void adjustItem(SetItem it, int dir) {
       return;
     }
     case SetItem::Level:       s.levelThreshold += 0.05f * dir; break;
-    case SetItem::Similarity:  s.similarityThreshold += 0.01f * dir; break;
-    case SetItem::Periodicity: s.periodicityThreshold += 0.01f * dir; break;
     case SetItem::OnDelay:     s.onDelayMs = (uint16_t)std::max(0, (int)s.onDelayMs + 50 * dir); break;
     case SetItem::OffDelay:    s.offDelayMs = (uint16_t)std::max(0, (int)s.offDelayMs + 100 * dir); break;
     case SetItem::MinShot:     s.minShotSeconds += dir; break;
@@ -857,7 +812,7 @@ void adjustItem(SetItem it, int dir) {
       while (idx + 1 < (int)sizeof(kGainSteps) && kGainSteps[idx] < snap.micGain) ++idx;
       if (kGainSteps[idx] != snap.micGain && dir < 0) ++idx;  // Zwischenwert -> darunter
       idx = constrain(idx + dir, 0, (int)sizeof(kGainSteps) - 1);
-      app.cmdSetMicGain(kGainSteps[idx]);
+      app().cmdSetMicGain(kGainSteps[idx]);
       return;
     }
     case SetItem::Scale:
@@ -891,24 +846,18 @@ void adjustItem(SetItem it, int dir) {
     case SetItem::Noise:
       if (snap.noiseCount) noiseSel = (noiseSel + snap.noiseCount + dir) % snap.noiseCount;
       return;
-    case SetItem::Template:
-      if (snap.profileTemplates) {
-        templateSel = (templateSel + snap.profileTemplates + dir) % snap.profileTemplates;
-      }
-      return;
     default:
       return;
   }
-  app.cmdApplySettings(s);  // begrenzt die Werte und speichert im Profil
+  app().cmdApplySettings(s);  // begrenzt die Werte und speichert im Profil
 }
 
 void runAction(SetItem it) {
   switch (it) {
-    case SetItem::Noise:        app.cmdDeleteNoise(noiseSel); noiseSel = 0; break;
-    case SetItem::Grinder:      app.cmdDeleteGrinder(grinderSel); grinderSel = 0; break;
-    case SetItem::Template:     app.cmdDeleteTemplate(templateSel); templateSel = 0; break;
-    case SetItem::ClearHistory: app.cmdClearHistory(); break;
-    case SetItem::ResetProfile: app.cmdDeleteSlot(snap.activeSlot); break;
+    case SetItem::Noise:        app().cmdDeleteNoise(noiseSel); noiseSel = 0; break;
+    case SetItem::Grinder:      app().cmdDeleteGrinder(grinderSel); grinderSel = 0; break;
+    case SetItem::ClearHistory: app().cmdClearHistory(); break;
+    case SetItem::ResetProfile: app().cmdDeleteSlot(snap.activeSlot); break;
     case SetItem::ScalePortafilter: scale::learnPortafilter(); break;
     case SetItem::ScaleSearch:  scale::startSearch(); scaleSel = 0; break;
     case SetItem::ScaleChoose: {
@@ -929,7 +878,6 @@ void drawSettings() {
   setPage = constrain(setPage, 0, pages - 1);
   if (noiseSel >= snap.noiseCount) noiseSel = 0;
   if (grinderSel >= snap.grinderCount) grinderSel = 0;
-  if (templateSel >= snap.profileTemplates) templateSel = 0;
 
   // Zeilen: Bezeichnung links, Wert rechts; gewählte Zeile hinterlegt
   for (int r = 0; r < kSetRows; ++r) {
@@ -959,7 +907,7 @@ void drawSettings() {
   // Buttons passend zum gewählten Eintrag
   const SetItem sel = items[setSelected];
   btnMinus.visible = btnPlus.visible = hasValue(sel);
-  btnAction.visible = hasAction(sel) && !(sel == SetItem::Template && snap.profileTemplates <= 1);
+  btnAction.visible = hasAction(sel);
   const bool confirming = confirmItem == sel && millis() < confirmUntil;
   btnAction.label = confirming ? "SICHER?"
                   : sel == SetItem::ResetProfile ? "RESET"
@@ -1009,7 +957,7 @@ void handleSettingsTouch(int x, int y) {
       confirmUntil = millis() + 3000;
     }
   } else if (btnSetBack.hit(x, y)) {
-    app.flushSettings();  // Änderungen beim Verlassen sofort sichern
+    app().flushSettings();  // Änderungen beim Verlassen sofort sichern
     screen = Screen::Info;
   }
 }
@@ -1020,9 +968,9 @@ void handleSettingsTouch(int x, int y) {
 
 /// Empfindlichkeit ändern: niedrigere Pegel-Schwelle = empfindlicher.
 void changeSensitivity(float delta) {
-  DetectorSettings s = app.settings();
+  DetectorSettings s = app().settings();
   s.levelThreshold -= delta;
-  app.cmdApplySettings(s);  // wird intern begrenzt und gespeichert
+  app().cmdApplySettings(s);  // wird intern begrenzt und gespeichert
 }
 
 void handleTouch() {
@@ -1042,7 +990,7 @@ void handleTouch() {
         if (snap.scaleConnected) {
           screen = Screen::ResetMenu;
         } else {
-          app.cmdResetTimer();
+          app().cmdResetTimer();
         }
       } else if (btnInfo.hit(x, y)) {
         screen = Screen::Info;
@@ -1051,9 +999,9 @@ void handleTouch() {
 
     case Screen::ResetMenu:
       if (btnResetAll.hit(x, y)) {
-        app.cmdResetTimer();  // Timer, Gewicht und Waagen-Timer
+        app().cmdResetTimer();  // Timer, Gewicht und Waagen-Timer
       } else if (btnResetTimer.hit(x, y)) {
-        app.cmdResetTimer(false);
+        app().cmdResetTimer(false);
       } else if (btnResetTare.hit(x, y)) {
         scale::tare();
       } else if (btnResetScale.hit(x, y)) {
@@ -1071,7 +1019,7 @@ void handleTouch() {
           {btnLearnGrinder, TeachMode::Grinder}, {btnLearnNoise, TeachMode::Noise}};
       for (const auto& c : choices) {
         if (c.b.hit(x, y)) {
-          app.cmdStartTeach(c.m);
+          app().cmdStartTeach(c.m);
           screen = Screen::Teach;
           return;
         }
@@ -1084,15 +1032,15 @@ void handleTouch() {
 
     case Screen::Teach:
       if (btnFinish.hit(x, y)) {
-        app.cmdFinishTeach();
+        app().cmdFinishTeach();
       } else if (btnSave.hit(x, y)) {
-        if (app.cmdSaveTeach(false)) screen = Screen::Main;
+        if (app().cmdSaveTeach(false)) screen = Screen::Main;
       } else if (btnAdd.hit(x, y)) {
-        if (app.cmdSaveTeach(true)) screen = Screen::Main;
+        if (app().cmdSaveTeach(true)) screen = Screen::Main;
       } else if (btnRetry.hit(x, y)) {
-        app.cmdStartTeach(snap.teachMode);  // gleichen Modus wiederholen
+        app().cmdStartTeach(snap.teachMode);  // gleichen Modus wiederholen
       } else if (btnCancel.hit(x, y)) {
-        app.cmdCancelTeach();
+        app().cmdCancelTeach();
         screen = Screen::Main;
       }
       break;
@@ -1134,7 +1082,7 @@ void loop() {
   if (now - lastDrawMs < cfg::kDisplayIntervalMs) return;
   lastDrawMs = now;
 
-  app.snapshot(snap);
+  app().snapshot(snap);
 
   // Teach-Modus wurde ggf. über die Webseite gestartet/beendet -> Screen folgen.
   if (snap.teachPhase != TeachPhase::Idle) {

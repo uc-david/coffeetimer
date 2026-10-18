@@ -59,76 +59,6 @@ float ramp(float x, float a, float b) {
   return constrain((x - a) / (b - a), 0.0f, 1.0f);
 }
 
-float dotBands(const float* a, const float* b) {
-  float s = 0.0f;
-  for (size_t i = 0; i < cfg::kNumBands; ++i) s += a[i] * b[i];
-  return s;
-}
-
-/// Normiert einen Vektor auf Länge 1 (Nullvektor bleibt unverändert).
-void normalize(float* v) {
-  float n = sqrtf(dotBands(v, v));
-  if (n < 1e-6f) return;
-  for (size_t i = 0; i < cfg::kNumBands; ++i) v[i] /= n;
-}
-
-/**
- * Sphärisches k-Means: gruppiert die (normierten) Klangvektoren der Pumpe in
- * bis zu k Muster. Startwerte sind zeitlich gleichmäßig verteilte Frames –
- * so landen Anlauf, Druckaufbau und voller Druck typischerweise in eigenen
- * Gruppen.
- * @param vecs   n Vektoren à kNumBands, jeweils normiert
- * @param out    Ergebnis-Muster
- * @return Anzahl der Muster (nach Entfernen von Duplikaten / Kleinstgruppen)
- */
-size_t clusterTemplates(const float* vecs, size_t n, size_t k,
-                        float (*out)[cfg::kNumBands]) {
-  constexpr size_t B = cfg::kNumBands;
-  if (n == 0) return 0;
-  k = std::max<size_t>(1, std::min(k, n / 15));
-
-  std::vector<float> centers(k * B);
-  for (size_t j = 0; j < k; ++j) {
-    memcpy(&centers[j * B], &vecs[((2 * j + 1) * n / (2 * k)) * B], B * sizeof(float));
-  }
-
-  std::vector<size_t> sizes(k);
-  std::vector<float> sums(k * B);
-  for (int iter = 0; iter < 12; ++iter) {
-    std::fill(sums.begin(), sums.end(), 0.0f);
-    std::fill(sizes.begin(), sizes.end(), 0);
-    for (size_t i = 0; i < n; ++i) {
-      const float* v = &vecs[i * B];
-      size_t best = 0;
-      float bestSim = -2.0f;
-      for (size_t j = 0; j < k; ++j) {
-        const float s = dotBands(v, &centers[j * B]);
-        if (s > bestSim) { bestSim = s; best = j; }
-      }
-      for (size_t b = 0; b < B; ++b) sums[best * B + b] += v[b];
-      ++sizes[best];
-    }
-    for (size_t j = 0; j < k; ++j) {
-      if (sizes[j] == 0) continue;  // leere Gruppe: alten Mittelpunkt behalten
-      memcpy(&centers[j * B], &sums[j * B], B * sizeof(float));
-      normalize(&centers[j * B]);
-    }
-  }
-
-  // Kleinstgruppen (< 5 %, eher Störgeräusche) und Duplikate verwerfen.
-  size_t count = 0;
-  for (size_t j = 0; j < k; ++j) {
-    if (sizes[j] < n / 20 + 1) continue;
-    bool dup = false;
-    for (size_t u = 0; u < count; ++u) {
-      if (dotBands(&centers[j * B], out[u]) > cfg::kTemplateMergeSimilarity) { dup = true; break; }
-    }
-    if (dup) continue;
-    memcpy(out[count++], &centers[j * B], B * sizeof(float));
-  }
-  return count;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -147,23 +77,22 @@ void TeachResult::addMessage(const char* fmt, ...) {
 // TeachController
 // ---------------------------------------------------------------------------
 void TeachController::begin() {
-  // Pumpe: bis 60 s ≈ 1900 Frames -> ~210 kB Merkmale + ~850 kB Autokorrelation.
+  // Pumpe: bis 60 s ≈ 1900 Frames -> ~330 kB Merkmale.
   bgFrames_ = static_cast<AudioFrame*>(allocLarge(sizeof(AudioFrame) * cfg::kTeachMaxBgFrames));
-  bgCurves_ = static_cast<int8_t*>(allocLarge(cfg::kAcfLen * cfg::kTeachMaxBgFrames));
   pumpFrames_ = static_cast<AudioFrame*>(allocLarge(sizeof(AudioFrame) * cfg::kTeachMaxPumpFrames));
-  pumpCurves_ = static_cast<int8_t*>(allocLarge(cfg::kAcfLen * cfg::kTeachMaxPumpFrames));
 }
 
 void TeachController::start(uint32_t nowMs, TeachMode mode, const DetectorSettings& current,
-                            const PumpProfile& profile, const NoiseProfile& noise,
-                            const GrinderProfile* grinders, float gain) {
+                            const PumpProfile& profile, const GrinderProfile* grinders, uint8_t noiseCount,
+                            const classifier::Classifier* cls, float gain) {
   mode_ = mode;
   grinders_ = grinders;
+  noiseCount_ = noiseCount;
+  classifier_ = cls;
   gain_ = gain;
   clearResult();
   settings_ = current;
   currentProfile_ = profile;
-  currentNoise_ = noise;
   pumpCount_ = 0;
   triggerFrames_ = 0;
   recordedMs_ = 0;
@@ -174,16 +103,13 @@ void TeachController::start(uint32_t nowMs, TeachMode mode, const DetectorSettin
   bgCount_ = 0;
   bgRmsDb_ = -90.0f;
   enterPhase(TeachPhase::Background, nowMs);
-  if (!bgFrames_ || !bgCurves_ || !pumpFrames_ || !pumpCurves_) {
+  if (!bgFrames_ || !pumpFrames_) {
     fail("Nicht genug Speicher für die Aufnahme (PSRAM).");
   }
 }
 
 void TeachController::clearResult() {
-  // Kopie aus einem statischen Leerobjekt: TeachResult ist ~9 kB groß und
-  // soll nicht als Temporärobjekt auf dem Stack landen.
-  static const TeachResult kEmpty;
-  result_ = kEmpty;
+  resetInPlace(result_);  // ~1,4 kB – kein Temporärobjekt auf dem Stack
   result_.mode = mode_;
 }
 
@@ -241,7 +167,8 @@ const char* TeachController::instruction() const {
                        : "Schritt 3/3: Aufnahme läuft – Gerät normal laufen lassen, danach ausschalten.";
       case TeachPhase::Done:
         return error ? "Aufnahme nicht verwendbar – bitte wiederholen."
-                     : grinder ? "Aufnahme fertig – als Mühle speichern?" : "Aufnahme fertig – Störgeräusch speichern?";
+                     : grinder ? "Aufnahme fertig – als Mühle speichern oder ergänzen?"
+                               : "Aufnahme fertig – Störgeräusch speichern oder ergänzen?";
       default:
         break;
     }
@@ -263,18 +190,7 @@ const char* TeachController::instruction() const {
   return "";
 }
 
-void TeachController::storeCurve(int8_t* dst, const float* curve) {
-  for (size_t i = 0; i < cfg::kAcfLen; ++i) {
-    const float r = constrain(curve[i], -1.0f, 1.0f);
-    dst[i] = static_cast<int8_t>(lroundf(r * 127.0f));
-  }
-}
-
-void TeachController::loadCurve(const int8_t* src, float* curve) {
-  for (size_t i = 0; i < cfg::kAcfLen; ++i) curve[i] = src[i] / 127.0f;
-}
-
-void TeachController::process(const AudioFrame& f, const float* curve) {
+void TeachController::process(const AudioFrame& f) {
   if (!recording()) return;
 
   liveRmsDb_ = f.rmsDb;
@@ -284,9 +200,7 @@ void TeachController::process(const AudioFrame& f, const float* curve) {
     case TeachPhase::Background: {
       // Erste Millisekunden verwerfen: Geräusch der Touch-Berührung o. ä.
       if (elapsed >= cfg::kTeachBackgroundSkipMs && bgCount_ < cfg::kTeachMaxBgFrames) {
-        bgFrames_[bgCount_] = f;
-        storeCurve(&bgCurves_[bgCount_ * cfg::kAcfLen], curve);
-        ++bgCount_;
+        bgFrames_[bgCount_++] = f;
       }
       progress_ = constrain(static_cast<float>(elapsed) / cfg::kTeachBackgroundMs, 0.0f, 1.0f);
       if (elapsed >= cfg::kTeachBackgroundMs) {
@@ -326,9 +240,7 @@ void TeachController::process(const AudioFrame& f, const float* curve) {
     case TeachPhase::RecordPump: {
       recordedMs_ = elapsed;
       if (elapsed >= cfg::kTeachPumpSkipMs && pumpCount_ < cfg::kTeachMaxPumpFrames) {
-        pumpFrames_[pumpCount_] = f;
-        storeCurve(&pumpCurves_[pumpCount_ * cfg::kAcfLen], curve);
-        ++pumpCount_;
+        pumpFrames_[pumpCount_++] = f;
       }
       // Ende erkennen: Pumpe lange genug still (Pausen der Pre-Infusion
       // werden überbrückt), Puffer voll oder Maximaldauer erreicht.
@@ -406,10 +318,56 @@ void TeachController::finishBackground() {
   }
 }
 
+void TeachController::classifyRecording(const std::vector<size_t>& active) {
+  TeachResult& r = result_;
+  const classifier::Classifier* cls = classifier_;
+  r.clsReady = cls && cls->ready() && !active.empty();
+  if (!r.clsReady) return;
+
+  // Welche Mühle / welches Störgeräusch hört die KI am häufigsten?
+  size_t grinderHits[cfg::kMaxGrinders] = {}, noiseHits[cfg::kMaxNoises] = {};
+  for (size_t i : active) {
+    const classifier::Result c = cls->classify(pumpFrames_[i].bandDb);
+    if (c.kind == classifier::Kind::Grinder && c.index < cfg::kMaxGrinders) ++grinderHits[c.index];
+    if (c.kind == classifier::Kind::Noise && c.index < cfg::kMaxNoises) ++noiseHits[c.index];
+  }
+  auto best = [&](const size_t* hits, size_t count, int8_t& match, float& share) {
+    for (size_t k = 0; k < count; ++k) {
+      const float sh = static_cast<float>(hits[k]) / active.size();
+      if (sh > share) {
+        share = sh;
+        match = static_cast<int8_t>(k);
+      }
+    }
+    // Eindeutig nur ab 20 % der Klangbilder; mit genau einem Eintrag ist es dieser.
+    if (share < 0.2f) match = count == 1 ? 0 : -1;
+  };
+  best(grinderHits, grinders_ ? grinders_->count : 0, r.grinderMatch, r.grinderMatchShare);
+  best(noiseHits, noiseCount_, r.noiseMatch, r.noiseMatchShare);
+}
+
+namespace {
+/// Anteil der Frames, die mit Profil p wie im Betrieb als Pumpe erkannt würden
+/// (Pegel, Gleichmäßigkeit in zeitlicher Reihenfolge, KI).
+float shareAsPump(const AudioFrame* frames, size_t n, const std::vector<size_t>& active, const PumpProfile& p,
+                  const DetectorSettings& st, float gain, const classifier::Classifier* cls) {
+  if (active.empty()) return 0.0f;
+  const float off = PumpDetector::gainOffsetDb(p.micGain, gain);
+  std::vector<float> steady(n);
+  SteadinessTracker tr;
+  for (size_t i = 0; i < n; ++i) {
+    steady[i] = tr.update(frames[i].rmsDb + off, PumpDetector::isLoud(frames[i].rmsDb + off, p, st, false));
+  }
+  size_t hits = 0;
+  for (size_t i : active) {
+    const FrameScores s = PumpDetector::score(frames[i].bandDb, frames[i].rmsDb, steady[i], p, gain, cls);
+    hits += PumpDetector::matches(s, p, st, false);
+  }
+  return static_cast<float>(hits) / active.size();
+}
+}  // namespace
+
 void TeachController::analyzePump() {
-  constexpr size_t B = cfg::kNumBands;
-  constexpr size_t L = cfg::kAcfLen;
-  static const NoiseProfile kNoNoise;  // Bewertung zunächst ohne Störgeräusche
   TeachResult& r = result_;
   clearResult();
   PumpProfile& p = r.profile;
@@ -418,19 +376,10 @@ void TeachController::analyzePump() {
   // Stille am Ende (Pumpe bereits aus) abschneiden.
   pumpCount_ = std::min(pumpCount_, lastLoudIndex_);
 
-  // =========================================================================
-  // 1. Hintergrund
-  // =========================================================================
+  // --- Hintergrund ------------------------------------------------------------
   rmsStats(bgFrames_, bgCount_, p.bgRmsDb, r.bgStdDb);
-  for (size_t b = 0; b < B; ++b) {
-    double sum = 0.0;
-    for (size_t i = 0; i < bgCount_; ++i) sum += bgFrames_[i].bandDb[b];
-    p.bgBandDb[b] = static_cast<float>(sum / std::max<size_t>(bgCount_, 1));
-  }
 
-  // =========================================================================
-  // 2. Hörbare Pumpen-Frames bestimmen, Pausen messen
-  // =========================================================================
+  // --- Hörbare Pumpen-Frames bestimmen, Pausen messen -------------------------
   const float activeLimit = p.bgRmsDb + cfg::kTeachActiveDb;
   std::vector<size_t> active;
   active.reserve(pumpCount_);
@@ -447,6 +396,7 @@ void TeachController::analyzePump() {
   r.activeSeconds = active.size() * cfg::kFrameSize / static_cast<float>(cfg::kSampleRate);
   r.longestPauseMs = static_cast<uint32_t>(longestGap * cfg::kFrameSize * 1000 / cfg::kSampleRate);
   r.clipRatio = meanClip(pumpFrames_, pumpCount_);
+  r.trainFrames = static_cast<uint16_t>(std::min(active.size(), classifier::kMaxFramesPerRecord));
 
   if (active.size() * cfg::kFrameSize * 1000 / cfg::kSampleRate < cfg::kTeachPumpMinActiveMs) {
     fail("Pumpe nur %.1f s hörbar (mind. %.0f s nötig). Bezug länger laufen lassen bzw. "
@@ -455,9 +405,7 @@ void TeachController::analyzePump() {
     return;
   }
 
-  // =========================================================================
-  // 3. Pegel: Referenz = leiser Teil der Pumpe
-  // =========================================================================
+  // --- Pegel: Referenz = leiser Teil der Pumpe ---------------------------------
   {
     std::vector<float> levels;
     levels.reserve(active.size());
@@ -465,182 +413,23 @@ void TeachController::analyzePump() {
     p.pumpRmsDb = percentile(levels, 0.10f);
   }
   r.snrDb = p.pumpRmsDb - p.bgRmsDb;
-
-  // =========================================================================
-  // 4. Klangmuster (Clustering der Überschuss-Spektren)
-  // =========================================================================
-  float* vecs = static_cast<float*>(allocLarge(active.size() * B * sizeof(float)));
-  if (!vecs) {
-    fail("Nicht genug Speicher für die Auswertung.");
-    return;
-  }
-  size_t nVecs = 0;
-  double meanExcess[B] = {};
-  for (size_t i : active) {
-    for (size_t b = 0; b < B; ++b) meanExcess[b] += pumpFrames_[i].bandDb[b] - p.bgBandDb[b];
-    if (PumpDetector::excessVector(pumpFrames_[i].bandDb, p.bgBandDb, &vecs[nVecs * B]) > 0.0f) {
-      ++nVecs;
-    }
-  }
-  for (size_t b = 0; b < B; ++b) {
-    if (meanExcess[b] / active.size() >= cfg::kQualDistinctBandDb) ++r.distinctBands;
-  }
-  p.templateCount = static_cast<uint8_t>(
-      clusterTemplates(vecs, nVecs, cfg::kTemplatesPerTeach, p.templates));
-  free(vecs);
-  p.valid = p.templateCount > 0;
+  p.valid = true;
   p.recordings = 1;
 
-  // Klangfarben-Kontrast: Wie stark unterscheiden sich die Bänder? Ist die
-  // Pumpe in allen Bändern etwa gleich viel lauter als der Hintergrund
-  // (rauschartig), gibt es kaum eine Klangfarbe, an der man sie erkennt.
-  {
-    double mean = 0.0, sq = 0.0;
-    for (size_t b = 0; b < B; ++b) {
-      const double v = meanExcess[b] / active.size();
-      mean += v;
-      sq += v * v;
-    }
-    mean /= B;
-    r.contrastDb = static_cast<float>(sqrt(std::max(0.0, sq / B - mean * mean)));
-  }
-  const bool broadband = r.contrastDb < 2.0f;
-
-  // Gleichmäßigkeit je Frame (in zeitlicher Reihenfolge, wie im Betrieb)
-  std::vector<float> pumpSteady(pumpCount_), bgSteady(bgCount_);
+  // --- Gleichmäßigkeit je Frame (in zeitlicher Reihenfolge, wie im Betrieb) ----
   {
     SteadinessTracker tr;
-    for (size_t i = 0; i < pumpCount_; ++i) {
-      pumpSteady[i] = tr.update(pumpFrames_[i].rmsDb,
-                                PumpDetector::isLoud(pumpFrames_[i].rmsDb, p, settings_, false));
-    }
-    tr.reset();
-    for (size_t i = 0; i < bgCount_; ++i) {
-      bgSteady[i] = tr.update(bgFrames_[i].rmsDb,
-                              PumpDetector::isLoud(bgFrames_[i].rmsDb, p, settings_, false));
+    std::vector<float> valid;
+    for (size_t i = 0, a = 0; i < pumpCount_; ++i) {
+      const float st = tr.update(pumpFrames_[i].rmsDb, PumpDetector::isLoud(pumpFrames_[i].rmsDb, p, settings_, false));
+      const bool isActive = a < active.size() && active[a] == i;
+      if (isActive) ++a;
+      if (isActive && st < SteadinessTracker::kUnsteady) valid.push_back(st);
     }
     // Schwelle: deutlich über der Schwankung der Pumpe (95 %), mind. 1,5 dB.
-    std::vector<float> valid;
-    for (size_t i : active) {
-      if (pumpSteady[i] < SteadinessTracker::kUnsteady) valid.push_back(pumpSteady[i]);
-    }
     r.pumpSteadiness = valid.size() >= 10 ? percentile(valid, 0.95f) : 4.0f;
     p.steadyThreshold = constrain(r.pumpSteadiness * 1.5f + 0.5f, 1.5f, 6.0f);
   }
-
-  // =========================================================================
-  // 5. Takt und Rhythmus-Fingerabdruck (Autokorrelation der Hüllkurve)
-  // =========================================================================
-  float curve[L];
-  std::vector<float> meanAcf(L, 0.0f);
-  for (size_t i : active) {
-    loadCurve(&pumpCurves_[i * L], curve);
-    for (size_t k = 0; k < L; ++k) meanAcf[k] += curve[k];
-  }
-  for (float& v : meanAcf) v /= active.size();
-  // Leicht geglättete Kopie für die Spitzensuche (Spitzen der Hüllkurven-
-  // Autokorrelation sind breit und haben kleine Zacken).
-  std::vector<float> smooth(cfg::kAcfLen, 0.0f);
-  float maxAcf = -1.0f;
-  for (size_t k = 0; k < cfg::kAcfLen; ++k) {
-    float sum = 0.0f;
-    int n = 0;
-    for (int d = -3; d <= 3; ++d) {
-      const int j = static_cast<int>(k) + d;
-      if (j >= 0 && j < (int)cfg::kAcfLen) { sum += meanAcf[j]; ++n; }
-    }
-    smooth[k] = sum / n;
-    maxAcf = std::max(maxAcf, smooth[k]);
-  }
-  // Kleinste Taktlänge, deren Spitze fast so hoch ist wie die höchste:
-  // vermeidet, dass ein Vielfaches des Takts (z. B. 25 statt 50 Hz) gewählt wird.
-  size_t lagIdx = 0;
-  for (size_t k = 1; k + 1 < cfg::kAcfLen; ++k) {
-    if (smooth[k] >= smooth[k - 1] && smooth[k] >= smooth[k + 1] && smooth[k] >= 0.9f * maxAcf) {
-      lagIdx = k;
-      break;
-    }
-  }
-  // Feinsuche: echtes Maximum im Umkreis von ±8 % (Spitzenmitte statt Flanke).
-  {
-    const float center = static_cast<float>(cfg::kMinLag + lagIdx);
-    const int lo = std::max(0, static_cast<int>(center * 0.92f) - (int)cfg::kMinLag);
-    const int hi = std::min((int)cfg::kAcfLen - 1, static_cast<int>(center * 1.08f) - (int)cfg::kMinLag);
-    for (int k = lo; k <= hi; ++k) {
-      if (smooth[k] > smooth[lagIdx]) lagIdx = k;
-    }
-  }
-  const float lag = static_cast<float>(cfg::kMinLag + lagIdx);
-
-  // Rhythmus-Fingerabdruck = Form der mittleren Kurve. Vorläufig Takt
-  // annehmen, damit score() Takt-Stärke und Rhythmus-Form berechnet.
-  PumpDetector::normalizeCurve(meanAcf.data(), p.rhythm);
-  p.periodic = true;
-  p.periodLag = lag;
-
-  // Vergleichswerte aller Frames mit dem neuen Profil
-  std::vector<FrameScores> pumpScores, bgScores;
-  pumpScores.reserve(active.size());
-  for (size_t i : active) {
-    loadCurve(&pumpCurves_[i * L], curve);
-    pumpScores.push_back(PumpDetector::score(pumpFrames_[i].bandDb, pumpFrames_[i].rmsDb, curve,
-                                             pumpSteady[i], p, kNoNoise, nullptr, gain_));
-  }
-  for (size_t i = 0; i < bgCount_; ++i) {
-    loadCurve(&bgCurves_[i * L], curve);
-    bgScores.push_back(PumpDetector::score(bgFrames_[i].bandDb, bgFrames_[i].rmsDb, curve,
-                                           bgSteady[i], p, kNoNoise, nullptr, gain_));
-  }
-  auto collect = [](const std::vector<FrameScores>& v, float FrameScores::*field) {
-    std::vector<float> out;
-    out.reserve(v.size());
-    for (const FrameScores& s : v) out.push_back(s.*field);
-    return out;
-  };
-  std::vector<float> tmp = collect(pumpScores, &FrameScores::periodicity);
-  r.pumpPeriodicity = percentile(tmp, 0.10f);
-  const float pumpPer25 = percentile(tmp, 0.25f);
-  tmp = collect(bgScores, &FrameScores::periodicity);
-  r.bgPeriodicity = percentile(tmp, 0.90f);
-  tmp = collect(pumpScores, &FrameScores::rhythm);
-  r.pumpRhythm = percentile(tmp, 0.05f);
-  tmp = collect(bgScores, &FrameScores::rhythm);
-  r.bgRhythm = percentile(tmp, 0.90f);
-
-  p.periodic = maxAcf > 0.0f && pumpPer25 >= cfg::kQualMinPeriodicity &&
-               pumpPer25 - r.bgPeriodicity >= cfg::kQualMinPeriodicGap;
-  if (!p.periodic) p.periodLag = 0.0f;
-
-  // Rhythmus-Schwelle: knapp unter dem schwächsten Teil der Pumpe, möglichst
-  // deutlich über dem Hintergrund.
-  float rhyTh = r.pumpRhythm - 0.05f;
-  if (rhyTh < r.bgRhythm + 0.1f) rhyTh = 0.5f * (r.pumpRhythm + r.bgRhythm);
-  p.rhythmThreshold = constrain(rhyTh, 0.2f, 0.9f);
-
-  std::vector<float> pumpSim = collect(pumpScores, &FrameScores::similarity);
-  std::vector<float> bgSim = collect(bgScores, &FrameScores::similarity);
-
-  // =========================================================================
-  // 6. Schwellen aus der Aufnahme ableiten
-  // =========================================================================
-  tmp = pumpSim;
-  r.selfSimilarity = percentile(tmp, 0.05f);
-  tmp = bgSim;
-  r.bgSimilarity = percentile(tmp, 0.90f);
-
-  // Klangmuster: knapp unter dem schwächsten Teil der Pumpe, aber möglichst
-  // über dem Hintergrund. Überlappen beide, wird die Mitte genommen.
-  bool spectralOverlap = false;
-  float simTh = r.selfSimilarity - 0.03f;
-  if (simTh < r.bgSimilarity + 0.05f) {
-    spectralOverlap = true;
-    simTh = 0.5f * (r.selfSimilarity + r.bgSimilarity);
-  }
-  r.suggestedSimilarity = constrain(simTh, 0.4f, 0.95f);
-
-  // Takt: in der Mitte zwischen Hintergrund und schwachem Teil der Pumpe.
-  r.suggestedPeriodicity = constrain(
-      std::max(r.bgPeriodicity + 0.05f, 0.5f * (r.pumpPeriodicity + r.bgPeriodicity)), 0.1f, 0.9f);
 
   // Ausschaltverzögerung muss die längste Pause (Pre-Infusion) überbrücken.
   r.suggestedOffDelayMs = settings_.offDelayMs;
@@ -648,46 +437,17 @@ void TeachController::analyzePump() {
     r.suggestedOffDelayMs = static_cast<uint16_t>(std::min<uint32_t>(r.longestPauseMs + 400, 5000));
   }
 
-  // =========================================================================
-  // 7. Probe-Erkennung: Wie viel der Aufnahme würde damit erkannt?
-  // =========================================================================
-  // Gleiche Entscheidung wie im Betrieb (PumpDetector::matches).
-  DetectorSettings eval = settings_;
-  eval.similarityThreshold = r.suggestedSimilarity;
-  eval.periodicityThreshold = r.suggestedPeriodicity;
-  size_t hits = 0, rejected = 0;
-  for (size_t j = 0; j < active.size(); ++j) {
-    if (!PumpDetector::matches(pumpScores[j], p, eval, false)) continue;
-    ++hits;
-    // Würde ein bereits gelerntes Störgeräusch diesen Frame verwerfen?
-    if (currentNoise_.count > 0) {
-      const size_t i = active[j];
-      loadCurve(&pumpCurves_[i * L], curve);
-      const FrameScores sn = PumpDetector::score(pumpFrames_[i].bandDb, pumpFrames_[i].rmsDb,
-                                                 curve, pumpSteady[i], p, currentNoise_, grinders_, gain_);
-      bool rej = false;
-      PumpDetector::matches(sn, p, eval, false, &rej);
-      if (rej) ++rejected;
-    }
-  }
-  r.coverage = static_cast<float>(hits) / active.size();
-  r.rejectedRatio = static_cast<float>(rejected) / active.size();
-  size_t falseHits = 0;
-  for (size_t i = 0; i < bgCount_; ++i) {
-    if (PumpDetector::matches(bgScores[i], p, eval, false)) ++falseHits;
-  }
-  r.falseRatio = bgCount_ ? static_cast<float>(falseHits) / bgCount_ : 0.0f;
+  // --- Was hört die bisherige KI? (mit den neuen Pegeln) ------------------------
+  classifyRecording(active);
+  const bool pumpKnown = r.clsReady && classifier_->hasKind(classifier::Kind::Pump);
+  if (pumpKnown) r.clsAsPump = shareAsPump(pumpFrames_, pumpCount_, active, p, settings_, gain_, classifier_);
 
-  // =========================================================================
-  // 8. Bewertung
-  // =========================================================================
+  // --- Bewertung ------------------------------------------------------------------
   bool error = false, warning = false;
-
-  // --- Fehler (Profil unbrauchbar) ---
   if (r.clipRatio > cfg::kQualMaxClipRatio) {
     error = true;
     r.addMessage("Übersteuert: %.1f %% der Samples am Anschlag. Gerät weiter von der "
-                 "Pumpe entfernt aufstellen.", r.clipRatio * 100.0f);
+                 "Pumpe entfernt aufstellen bzw. Mikrofon-Verstärkung verringern.", r.clipRatio * 100.0f);
   }
   if (r.snrDb < cfg::kQualMinSnrDb) {
     error = true;
@@ -695,77 +455,24 @@ void TeachController::analyzePump() {
                  "Näher an die Pumpe oder Störquellen (Radio, Mühle, Gespräche) abstellen.",
                  r.snrDb, cfg::kQualMinSnrDb);
   }
-  if (!p.valid || (r.distinctBands == 0 && !p.periodic)) {
-    error = true;
-    r.addMessage("Weder typisches Klangmuster noch Takt erkennbar – die Pumpe ist vom "
-                 "Hintergrund nicht unterscheidbar.");
-  }
-  if (r.coverage < cfg::kQualCoverageErr) {
-    error = true;
-    r.addMessage("Nur %.0f %% der Aufnahme würden als Pumpe erkannt. Klang zu "
-                 "unregelmäßig oder Störgeräusche während der Aufnahme.", r.coverage * 100.0f);
-  }
-  if (r.falseRatio > cfg::kQualMaxFalseRatio) {
-    error = true;
-    r.addMessage("Der Hintergrund würde zu %.0f %% als Pumpe erkannt – Hintergrund zu laut "
-                 "oder ähnlich. In ruhiger Umgebung wiederholen.", r.falseRatio * 100.0f);
-  }
-
-  // --- Warnungen (nutzbar, aber evtl. unzuverlässig) ---
   if (!error && r.snrDb < cfg::kQualGoodSnrDb) {
     warning = true;
     r.addMessage("Geringer Pegelabstand im leisen Teil (%.1f dB). Erkennung kann bei "
                  "Nebengeräuschen unzuverlässig sein.", r.snrDb);
-  }
-  if (!error && r.coverage < cfg::kQualCoverageWarn) {
-    warning = true;
-    r.addMessage("%.0f %% der Aufnahme werden erkannt – kurze Aussetzer möglich. Profil "
-                 "ggf. mit weiterer Aufnahme ergänzen.", r.coverage * 100.0f);
   }
   if (r.bgStdDb > cfg::kQualBgStdWarnDb) {
     warning = true;
     r.addMessage("Hintergrund war unruhig (±%.1f dB). Teach am besten in ruhiger Umgebung "
                  "wiederholen.", r.bgStdDb);
   }
-  if (!error && spectralOverlap && !p.periodic) {
-    warning = true;
-    r.addMessage("Klangmuster hebt sich wenig vom Hintergrund ab – Erkennung stützt sich "
-                 "vor allem auf den Pegel.");
-  }
-  if (r.rejectedRatio > 0.05f) {
-    warning = true;
-    r.addMessage("%.0f %% der Pumpe würden als gelerntes Störgeräusch verworfen – "
-                 "Störgeräusche ggf. löschen und neu einlernen.", r.rejectedRatio * 100.0f);
-  }
-  if (!error && !p.periodic && broadband) {
-    warning = true;
-    r.addMessage("Klangfarbe kaum ausgeprägt (rauschartig, Kontrast %.1f dB) – ähnliche Geräusche "
-                 "ggf. als Störgeräusch einlernen.", r.contrastDb);
-  }
-
-  // --- Hinweise (informativ) ---
-  if (p.periodic) {
-    r.addMessage("Pumpentakt %.0f Hz erkannt (typisch Vibrationspumpe) – Erkennung über Takt "
-                 "und Rhythmus-Form, unabhängig vom Klang (Leerbezug wie echter Bezug).",
-                 p.periodHz());
-  } else if (!error) {
-    r.addMessage("Kein ausgeprägter Takt (typisch Rotationspumpe) – Erkennung über "
-                 "Klangmuster.");
-  }
   if (!error) {
     r.addMessage("Pumpe läuft gleichmäßig (±%.1f dB) – unruhigere Geräusche über ±%.1f dB "
-                 "(Niesen, Sprechen, Klappern) werden ignoriert.",
-                 r.pumpSteadiness, p.steadyThreshold);
-    r.addMessage("%u Klangmuster aus %.1f s Pumpenlauf gelernt.", (unsigned)p.templateCount,
-                 r.activeSeconds);
-    // "Ergänzen" hängt die Muster an – passt nicht alles, fallen die ältesten weg.
-    const PumpProfile& cur = currentProfile_;
-    const size_t total = cur.templateCount + p.templateCount;
-    if (cur.valid && !cur.isDefault() && total > cfg::kMaxTemplates) {
-      r.addMessage("Hinweis zu „Ergänzen“: Platz für %u Klangmuster – bis zu %u der bisherigen (die ältesten) "
-                   "würden ersetzt. „Ersetzen“ betrifft das nicht.",
-                   (unsigned)cfg::kMaxTemplates, (unsigned)(total - cfg::kMaxTemplates));
+                 "(Niesen, Sprechen, Klappern) werden ignoriert.", r.pumpSteadiness, p.steadyThreshold);
+    if (pumpKnown) {
+      r.addMessage("Die bisherige KI erkennt %.0f %% dieser Aufnahme als Pumpe%s", r.clsAsPump * 100.0f,
+                   r.clsAsPump < 0.8f ? " – „Ergänzen“ bringt ihr diese Variante bei." : ".");
     }
+    r.addMessage("%u Klangbilder aus %.1f s Pumpenlauf für die KI.", (unsigned)r.trainFrames, r.activeSeconds);
   }
   if (r.suggestedOffDelayMs > settings_.offDelayMs) {
     r.addMessage("Pause von %.1f s erkannt (Pre-Infusion?) – Ausschaltverzögerung wird auf "
@@ -773,13 +480,10 @@ void TeachController::analyzePump() {
   }
 
   // --- Gesamtnote 0..100 ---
-  const float separation = std::max(ramp(r.selfSimilarity - r.bgSimilarity, 0.0f, 0.3f),
-                                     p.periodic ? ramp(r.pumpPeriodicity - r.bgPeriodicity, 0.1f, 0.4f) : 0.0f);
-  float score = 35.0f * ramp(r.snrDb, cfg::kQualMinSnrDb, 20.0f) +
-                30.0f * ramp(r.coverage, cfg::kQualCoverageErr, 1.0f) +
-                20.0f * separation +
-                10.0f * (1.0f - ramp(r.bgStdDb, 1.0f, 6.0f)) +
-                5.0f * (r.clipRatio <= cfg::kQualMaxClipRatio ? 1.0f : 0.0f);
+  float score = 50.0f * ramp(r.snrDb, cfg::kQualMinSnrDb, 20.0f) +
+                25.0f * (1.0f - ramp(r.bgStdDb, 1.0f, 6.0f)) +
+                15.0f * ramp(r.activeSeconds, 3.0f, 15.0f) +
+                10.0f * (r.clipRatio <= cfg::kQualMaxClipRatio ? 1.0f : 0.0f);
   if (error) score = fminf(score, 30.0f);
   r.score = static_cast<int>(lroundf(score));
   p.quality = static_cast<float>(r.score);
@@ -788,8 +492,8 @@ void TeachController::analyzePump() {
   if (r.quality == TeachQuality::Ok) {
     // Positive Zusammenfassung an den Anfang stellen.
     char summary[TeachResult::kMessageLen];
-    snprintf(summary, sizeof(summary), "Aufnahme gut: Pumpe %.1f dB über Hintergrund, "
-             "%.0f %% der Aufnahme erkannt.", r.snrDb, r.coverage * 100.0f);
+    snprintf(summary, sizeof(summary), "Aufnahme gut: Pumpe %.1f dB über Hintergrund, %.1f s hörbar.", r.snrDb,
+             r.activeSeconds);
     if (r.messageCount < TeachResult::kMaxMessages) {
       memmove(r.messages[1], r.messages[0], TeachResult::kMessageLen * r.messageCount);
       ++r.messageCount;
@@ -797,25 +501,18 @@ void TeachController::analyzePump() {
     strncpy(r.messages[0], summary, TeachResult::kMessageLen);
   }
 
-  Serial.printf("[teach] snr=%.1f cov=%.2f false=%.2f sim(p5)=%.2f bgSim(p90)=%.2f "
-                "per=%d lag=%.0f per(p10)=%.2f bgPer(p90)=%.2f rhy(p5)=%.2f bgRhy(p90)=%.2f "
-                "rhyTh=%.2f steady(p95)=%.2f steadyTh=%.2f contrast=%.1f templates=%u "
-                "rejected=%.2f score=%d\n",
-                r.snrDb, r.coverage, r.falseRatio, r.selfSimilarity, r.bgSimilarity,
-                p.periodic, lag, r.pumpPeriodicity, r.bgPeriodicity, r.pumpRhythm, r.bgRhythm,
-                p.rhythmThreshold, r.pumpSteadiness, p.steadyThreshold, r.contrastDb,
-                p.templateCount, r.rejectedRatio, r.score);
+  Serial.printf("[teach] snr=%.1f bgStd=%.1f aktiv=%.1fs pause=%lums steady(p95)=%.2f steadyTh=%.2f "
+                "kiPumpe=%.2f klangbilder=%u score=%d\n",
+                r.snrDb, r.bgStdDb, r.activeSeconds, (unsigned long)r.longestPauseMs, r.pumpSteadiness,
+                p.steadyThreshold, r.clsAsPump, (unsigned)r.trainFrames, r.score);
 
   phase_ = TeachPhase::Done;
   progress_ = 1.0f;
 }
 
 void TeachController::analyzeNoise() {
-  constexpr size_t B = cfg::kNumBands;
-  constexpr size_t L = cfg::kAcfLen;
   TeachResult& r = result_;
   clearResult();
-  const PumpProfile& p = currentProfile_;  // nur zur Bewertung: würde die Pumpe auslösen?
   NoiseProfile::Entry& e = r.noise;
   const bool grinder = mode_ == TeachMode::Grinder;
   const char* what = grinder ? "Mühle" : "Störgeräusch";
@@ -823,11 +520,6 @@ void TeachController::analyzeNoise() {
   // Eigener Hintergrund (Schritt 1) und eigene Verstärkung des Geräuschs.
   e.micGain = gain_;
   rmsStats(bgFrames_, bgCount_, e.bgRmsDb, r.bgStdDb);
-  for (size_t b = 0; b < B; ++b) {
-    double sum = 0.0;
-    for (size_t i = 0; i < bgCount_; ++i) sum += bgFrames_[i].bandDb[b];
-    e.bgBandDb[b] = static_cast<float>(sum / std::max<size_t>(bgCount_, 1));
-  }
 
   // Stille am Ende abschneiden, hörbare Frames bestimmen.
   pumpCount_ = std::min(pumpCount_, lastLoudIndex_);
@@ -838,48 +530,12 @@ void TeachController::analyzeNoise() {
   }
   r.activeSeconds = active.size() * cfg::kFrameSize / static_cast<float>(cfg::kSampleRate);
   r.clipRatio = meanClip(pumpFrames_, pumpCount_);
+  r.trainFrames = static_cast<uint16_t>(std::min(active.size(), classifier::kMaxFramesPerRecord));
   if (r.activeSeconds * 1000.0f < cfg::kTeachNoiseMinActiveMs) {
     fail("%s nur %.1f s hörbar (mind. %.0f s nötig). Länger laufen lassen.", what,
          r.activeSeconds, cfg::kTeachNoiseMinActiveMs / 1000.0f);
     return;
   }
-
-  // --- Klangmuster und Rhythmus-Fingerabdruck des Störgeräuschs -------------
-  float* vecs = static_cast<float*>(allocLarge(active.size() * B * sizeof(float)));
-  if (!vecs) {
-    fail("Nicht genug Speicher für die Auswertung.");
-    return;
-  }
-  size_t nVecs = 0;
-  float curve[L];
-  std::vector<float> meanCurve(L, 0.0f);
-  for (size_t i : active) {
-    if (PumpDetector::excessVector(pumpFrames_[i].bandDb, e.bgBandDb, &vecs[nVecs * B]) > 0.0f) {
-      ++nVecs;
-    }
-    loadCurve(&pumpCurves_[i * L], curve);
-    for (size_t k = 0; k < L; ++k) meanCurve[k] += curve[k];
-  }
-  e.templateCount = static_cast<uint8_t>(
-      clusterTemplates(vecs, nVecs, cfg::kNoiseTemplatesPerTeach, e.templates));
-  if (e.templateCount == 0) {
-    free(vecs);
-    fail("Kein verwertbares Klangmuster: %s hob sich kaum vom Hintergrund ab. Gerät näher "
-         "heranstellen bzw. während Schritt 1 wirklich Ruhe halten.", what);
-    return;
-  }
-
-  // Eigene Schwelle: so ähnlich ist das Geräusch seinen Mustern fast immer
-  // (5 %-Perzentil), mit etwas Reserve.
-  {
-    std::vector<float> sims;
-    sims.reserve(nVecs);
-    for (size_t i = 0; i < nVecs; ++i) {
-      sims.push_back(PumpDetector::bestTemplate(&vecs[i * B], e.templates, e.templateCount));
-    }
-    e.simThreshold = constrain(percentile(sims, 0.05f) - 0.05f, 0.5f, 0.95f);
-  }
-  free(vecs);
 
   // Eigener Pegel: leiser Teil des Geräuschs (10 %-Perzentil)
   {
@@ -888,52 +544,14 @@ void TeachController::analyzeNoise() {
     for (size_t i : active) levels.push_back(pumpFrames_[i].rmsDb);
     e.levelDb = percentile(levels, 0.10f);
   }
-  PumpDetector::normalizeCurve(meanCurve.data(), e.rhythm);
+  r.snrDb = e.levelDb - e.bgRmsDb;
 
-  // --- Wie oft wird es bisher bzw. künftig als Pumpe erkannt? ---------------
-  // Statisch: NoiseProfile ist ~6 kB groß.
-  static NoiseProfile extended;
-  extended = currentNoise_;
-  if (extended.count >= cfg::kMaxNoises) {
-    memmove(&extended.entries[0], &extended.entries[1],
-            sizeof(NoiseProfile::Entry) * (cfg::kMaxNoises - 1));
-    --extended.count;
-  }
-  extended.entries[extended.count++] = e;
-
-  // Gleichmäßigkeit wie im Betrieb (zeitliche Reihenfolge aller Frames,
-  // Pegel in den Einheiten des Pumpenprofils)
-  const float pOff = PumpDetector::gainOffsetDb(p.micGain, gain_);
-  std::vector<float> steady(pumpCount_);
-  {
-    SteadinessTracker tr;
-    for (size_t i = 0; i < pumpCount_; ++i) {
-      steady[i] = tr.update(pumpFrames_[i].rmsDb,
-                            PumpDetector::isLoud(pumpFrames_[i].rmsDb + pOff, p, settings_, false));
-    }
-  }
-
-  size_t before = 0, after = 0;
-  for (size_t i : active) {
-    loadCurve(&pumpCurves_[i * L], curve);
-    const AudioFrame& f = pumpFrames_[i];
-    FrameScores s = PumpDetector::score(f.bandDb, f.rmsDb, curve, steady[i], p, currentNoise_, grinders_, gain_);
-    if (PumpDetector::matches(s, p, settings_, false)) ++before;
-    s = PumpDetector::score(f.bandDb, f.rmsDb, curve, steady[i], p, extended, grinders_, gain_);
-    if (PumpDetector::matches(s, p, settings_, false)) ++after;
-  }
-  r.noiseHitBefore = static_cast<float>(before) / active.size();
-  r.noiseHitAfter = static_cast<float>(after) / active.size();
-
-  // Ähnlichkeit Störgeräusch <-> Pumpe: Ist sie sehr hoch, könnte das neue
-  // Störgeräusch auch die echte Pumpe unterdrücken.
-  float specSim = 0.0f;
-  for (size_t t = 0; t < e.templateCount; ++t) {
-    specSim = std::max(specSim, PumpDetector::bestTemplate(e.templates[t], p.templates, p.templateCount));
-  }
-  float rhySim = 0.0f;
-  for (size_t k = 0; k < L; ++k) rhySim += e.rhythm[k] * p.rhythm[k];
-  const bool similarToPump = p.periodic ? (rhySim > 0.9f && specSim > 0.9f) : specSim > 0.95f;
+  // --- Was hört die bisherige KI? ----------------------------------------------
+  classifyRecording(active);
+  const bool pumpKnown = r.clsReady && classifier_->hasKind(classifier::Kind::Pump);
+  // Wie oft würde es bisher als Pumpe erkannt (Pegel des Pumpenprofils, KI)?
+  r.clsAsPump = shareAsPump(pumpFrames_, pumpCount_, active, currentProfile_, settings_, gain_,
+                            r.clsReady ? classifier_ : nullptr);
 
   // --- Bewertung -------------------------------------------------------------
   bool error = false, warning = false;
@@ -942,71 +560,37 @@ void TeachController::analyzeNoise() {
     r.addMessage("Übersteuert (%.1f %% der Samples) – Gerät weiter entfernt aufnehmen.",
                  r.clipRatio * 100.0f);
   }
+  if (r.bgStdDb > cfg::kQualBgStdWarnDb) {
+    warning = true;
+    r.addMessage("Hintergrund war unruhig (±%.1f dB) – Schritt 1 am besten in Ruhe wiederholen.", r.bgStdDb);
+  }
   if (!error) {
-    r.addMessage("Bisher zu %.0f %% als Pumpe erkannt – mit dieser Aufnahme: %.0f %%.",
-                 r.noiseHitBefore * 100.0f, r.noiseHitAfter * 100.0f);
-  }
-  // Bei der Mühle ist Speichern immer nötig (Mühlen-Tara), daher nur beim Störgeräusch.
-  if (!error && !grinder && r.noiseHitBefore < 0.02f) {
-    r.addMessage("Wurde ohnehin nicht als Pumpe erkannt – Speichern ist nicht nötig, schadet "
-                 "aber nicht.");
-  }
-  if (!error && r.noiseHitAfter > cfg::kQualMaxNoiseHit) {
-    warning = true;
-    r.addMessage("Wird teilweise weiterhin als Pumpe erkannt. Ggf. Pegel-Schwelle erhöhen "
-                 "oder die Pumpe neu einlernen.");
-  }
-  if (similarToPump) {
-    warning = true;
-    r.addMessage("Klingt der Pumpe sehr ähnlich (Muster %.0f %%, Rhythmus %.0f %%) – die echte "
-                 "Pumpe könnte ebenfalls ignoriert werden. Nach dem Speichern testen!",
-                 specSim * 100.0f, rhySim * 100.0f);
-  }
-  // Mühle: ähnlichste vorhandene Mühle (Vorschlag zum Ergänzen)
-  if (mode_ == TeachMode::Grinder && grinders_) {
-    for (uint8_t gi = 0; gi < grinders_->count; ++gi) {
-      const NoiseProfile::Entry& ge = grinders_->entries[gi];
-      float sim = 0.0f;
-      for (size_t t = 0; t < e.templateCount; ++t) {
-        sim = std::max(sim, PumpDetector::bestTemplate(e.templates[t], ge.templates, ge.templateCount));
-      }
-      if (sim > r.grinderMatchSim) {
-        r.grinderMatchSim = sim;
-        r.grinderMatch = static_cast<int8_t>(gi);
-      }
-    }
-    if (r.grinderMatch >= 0) {
-      r.addMessage("Am ähnlichsten: %s (%.0f %%) – „Ergänzen“, wenn es dieselbe Mühle ist, sonst als "
-                   "neue Mühle speichern.", grinders_->names[r.grinderMatch], r.grinderMatchSim * 100.0f);
-      const size_t total = grinders_->entries[r.grinderMatch].templateCount + e.templateCount;
-      if (total > cfg::kNoiseTemplates) {
-        r.addMessage("Hinweis zu „Ergänzen“: %s hat Platz für %u Klangmuster – bis zu %u der bisherigen "
-                     "(die ältesten) würden ersetzt.", grinders_->names[r.grinderMatch],
-                     (unsigned)cfg::kNoiseTemplates, (unsigned)(total - cfg::kNoiseTemplates));
-      }
+    r.addMessage("Bisher zu %.0f %% als Pumpe erkannt%s", r.clsAsPump * 100.0f,
+                 !pumpKnown ? " (Pumpe noch nicht eingelernt)." : ".");
+    if (!grinder && r.clsAsPump < 0.02f) {
+      r.addMessage("Wurde ohnehin nicht als Pumpe erkannt – Speichern schadet nicht und schärft die KI.");
     }
   }
-  // Störgeräusch: ähnlichstes vorhandenes (Vorschlag zum Ergänzen, z. B. 5 Aufnahmen
-  // desselben Milchaufschäumers in EINEM Eintrag statt fünf)
-  if (!grinder) {
-    for (uint8_t ni = 0; ni < currentNoise_.count; ++ni) {
-      const NoiseProfile::Entry& ne = currentNoise_.entries[ni];
-      float sim = 0.0f;
-      for (size_t t = 0; t < e.templateCount; ++t) {
-        sim = std::max(sim, PumpDetector::bestTemplate(e.templates[t], ne.templates, ne.templateCount));
-      }
-      if (sim > r.noiseMatchSim) {
-        r.noiseMatchSim = sim;
-        r.noiseMatch = static_cast<int8_t>(ni);
-      }
+  // Ergänzen-Vorschlag: was die KI in der Aufnahme hört
+  if (grinder && grinders_ && r.grinderMatch >= 0) {
+    if (r.grinderMatchShare >= 0.2f) {
+      r.addMessage("Die KI hört zu %.0f %% „%s“ – „Ergänzen“, wenn es dieselbe Mühle ist, sonst als neue "
+                   "Mühle speichern.", r.grinderMatchShare * 100.0f, grinders_->names[r.grinderMatch]);
+    } else {
+      r.addMessage("„Ergänzen“ fügt die Aufnahme „%s“ hinzu – bei einer anderen Mühle als neue Mühle speichern.",
+                   grinders_->names[r.grinderMatch]);
     }
-    if (r.noiseMatch >= 0) {
-      r.addMessage("Am ähnlichsten: Störgeräusch %d (%.0f %%) – „Ergänzen“, wenn es dasselbe Gerät ist.",
-                   r.noiseMatch + 1, r.noiseMatchSim * 100.0f);
+  }
+  if (!grinder && r.noiseMatch >= 0) {
+    if (r.noiseMatchShare >= 0.2f) {
+      r.addMessage("Die KI hört zu %.0f %% Störgeräusch %d – „Ergänzen“, wenn es dasselbe Gerät ist.",
+                   r.noiseMatchShare * 100.0f, r.noiseMatch + 1);
+    } else {
+      r.addMessage("„Ergänzen“ fügt die Aufnahme Störgeräusch %d hinzu.", r.noiseMatch + 1);
     }
   }
   // Liste voll: Beim Speichern als neuer Eintrag fällt das älteste weg – vorher sagen.
-  if (!grinder && currentNoise_.count >= cfg::kMaxNoises) {
+  if (!grinder && noiseCount_ >= cfg::kMaxNoises) {
     warning = true;
     r.addMessage("Liste voll (%u Störgeräusche): Als neues Störgeräusch gespeichert, wird Störgeräusch 1 (das "
                  "älteste) gelöscht – „Ergänzen“ vermeidet das.", (unsigned)cfg::kMaxNoises);
@@ -1015,15 +599,19 @@ void TeachController::analyzeNoise() {
     r.addMessage("Mühlen-Liste voll (%u): Die Aufnahme kann nur einer vorhandenen Mühle hinzugefügt werden.",
                  (unsigned)cfg::kMaxGrinders);
   }
-  r.addMessage("%.1f s aufgenommen, %u Klangmuster.", r.activeSeconds, (unsigned)e.templateCount);
+  r.addMessage("%.1f s aufgenommen (%.1f dB über dem Hintergrund), %u Klangbilder für die KI.", r.activeSeconds,
+               r.snrDb, (unsigned)r.trainFrames);
 
-  float score = 100.0f * (1.0f - r.noiseHitAfter) - (similarToPump ? 30.0f : 0.0f);
+  float score = 60.0f * ramp(r.snrDb, cfg::kTeachPumpTriggerDb, 20.0f) +
+                20.0f * (1.0f - ramp(r.bgStdDb, 1.0f, 6.0f)) +
+                20.0f * ramp(r.activeSeconds, 2.0f, 10.0f);
   if (error) score = fminf(score, 30.0f);
   r.score = constrain(static_cast<int>(lroundf(score)), 0, 100);
   r.quality = error ? TeachQuality::Error : (warning ? TeachQuality::Warning : TeachQuality::Ok);
 
-  Serial.printf("[teach-noise] aktiv=%.1fs vorher=%.2f nachher=%.2f spec=%.2f rhy=%.2f\n",
-                r.activeSeconds, r.noiseHitBefore, r.noiseHitAfter, specSim, rhySim);
+  Serial.printf("[teach-noise] aktiv=%.1fs snr=%.1f alsPumpe=%.2f muehle=%d(%.2f) stoer=%d(%.2f)\n",
+                r.activeSeconds, r.snrDb, r.clsAsPump, r.grinderMatch, r.grinderMatchShare, r.noiseMatch,
+                r.noiseMatchShare);
 
   phase_ = TeachPhase::Done;
   progress_ = 1.0f;

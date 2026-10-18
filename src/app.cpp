@@ -15,7 +15,17 @@
 #include "scale.h"
 #include "vibration.h"
 
-App app;
+App& app() {
+  // Das Objekt ist ~80 kB groß. Im internen RAM fehlt dieser Platz sonst
+  // WLAN/Bluetooth (Webseite fällt aus). PSRAM steht erst ab setup() bereit
+  // (initArduino), daher erst beim ersten Aufruf anlegen statt als Global.
+  static App* const instance = [] {
+    void* mem = heap_caps_malloc(sizeof(App), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = ::operator new(sizeof(App));  // ohne PSRAM: intern
+    return new (mem) App();
+  }();
+  return *instance;
+}
 
 namespace {
 // Großzügig: die Teach-Auswertung läuft ebenfalls in diesem Task.
@@ -26,9 +36,9 @@ constexpr BaseType_t kAudioTaskCore = 0;  // Core 1 gehört loop() (Display/Web)
 
 void App::begin() {
   mutex_ = xSemaphoreCreateMutex();
-  detector_.setGrinders(&grinders_);  // Zeiger bleibt gültig, Inhalt wechselt mit dem Slot
-  useClassifier_ = settings::loadUseClassifier();
-  detector_.setClassifier(&classifier_, useClassifier_);
+  // Zeiger bleiben gültig, Inhalt wechselt mit dem Slot
+  detector_.setGrinders(&grinders_);
+  detector_.setClassifier(&classifier_);
 
   activeSlot_ = settings::loadActiveSlot();
   micGain_ = settings::loadMicGain();
@@ -132,9 +142,8 @@ void App::handleFrame(AudioFrame& f) {
 
   // Während des Teach-Modus (inkl. Ergebnisanzeige) ruht die Erkennung,
   // damit das Lernen nicht versehentlich Bezüge auslöst.
-  // extractor_ wird nur vom Audio-Task benutzt -> Rhythmus-Kurve hier ohne Wettlauf lesbar.
   if (teach_.engaged()) {
-    teach_.process(f, extractor_.acfCurve());
+    teach_.process(f);
     return;
   }
 
@@ -142,7 +151,7 @@ void App::handleFrame(AudioFrame& f) {
   const auto source = vib.available ? static_cast<PumpDetector::Source>(vibration::config().mode)
                                     : PumpDetector::Source::Mic;
   detector_.setVibration(source, vib.active, vib.sinceMs);
-  const PumpDetector::Event ev = detector_.process(f, extractor_.acfCurve());
+  const PumpDetector::Event ev = detector_.process(f);
   const DetectorStatus& st = detector_.status();
   if (st.rejected) ++rejectedFrames_;
   handleGrinder(f);
@@ -163,9 +172,7 @@ void App::handleFrame(AudioFrame& f) {
           scale::timerStart();
         }
       }
-      Serial.printf("[detect] Pumpe EIN (sim=%.2f per=%.2f rhy=%.2f lvl=%.2f)\n",
-                    detector_.status().scores.similarity, detector_.status().scores.periodicity,
-                    detector_.status().scores.rhythm, detector_.status().scores.levelRatio);
+      Serial.printf("[detect] Pumpe EIN (ki=%.2f lvl=%.2f)\n", st.scores.clsPump, st.scores.levelRatio);
       break;
     }
     case PumpDetector::Event::Stopped: {
@@ -176,8 +183,9 @@ void App::handleFrame(AudioFrame& f) {
       if (current_.frames > 0) {
         FrameScores& m = current_.mean;
         const float n = current_.frames;
-        m.similarity /= n; m.periodicity /= n; m.rhythm /= n; m.levelRatio /= n;
-        m.noiseSimilarity /= n; m.noiseRhythm /= n; m.steadiness /= n;
+        m.levelRatio /= n;
+        m.steadiness /= n;
+        m.clsPump /= n;
       }
       if (eventCount_ == kMaxEvents) {
         memmove(&events_[0], &events_[1], sizeof(DetectionEvent) * (kMaxEvents - 1));
@@ -257,22 +265,19 @@ void App::accumulateEvent(const FrameScores& in) {
   if (e.frames == 0) {
     e.min = s;
   } else {
-    e.min.similarity = fminf(e.min.similarity, s.similarity);
-    e.min.periodicity = fminf(e.min.periodicity, s.periodicity);
-    e.min.rhythm = fminf(e.min.rhythm, s.rhythm);
     e.min.levelRatio = fminf(e.min.levelRatio, s.levelRatio);
-    e.min.noiseSimilarity = fminf(e.min.noiseSimilarity, s.noiseSimilarity);
-    e.min.noiseRhythm = fminf(e.min.noiseRhythm, s.noiseRhythm);
     e.min.steadiness = fmaxf(e.min.steadiness, s.steadiness);  // "Min" = ungünstigster Wert
+    e.min.clsPump = fminf(e.min.clsPump, s.clsPump);
   }
-  e.mean.steadiness += s.steadiness;
-  e.mean.similarity += s.similarity;
-  e.mean.periodicity += s.periodicity;
-  e.mean.rhythm += s.rhythm;
   e.mean.levelRatio += s.levelRatio;
-  e.mean.noiseSimilarity += s.noiseSimilarity;
-  e.mean.noiseRhythm += s.noiseRhythm;
+  e.mean.steadiness += s.steadiness;
+  e.mean.clsPump += s.clsPump;
   ++e.frames;
+}
+
+void App::countFrames(const classifier::TrainingSet& t, size_t (&perKind)[4]) {
+  for (size_t& n : perKind) n = 0;
+  for (const classifier::Record& r : t.records) perKind[static_cast<int>(r.kind)] += r.count();
 }
 
 void App::diagnosticsText(String& out) {
@@ -284,10 +289,8 @@ void App::diagnosticsText(String& out) {
     out += '\n';
   };
   auto scores = [&](const char* label, const FrameScores& s) {
-    add("  %-6s Pegel=%.2f Schwankung=%.1fdB Muster=%.2f Takt=%.2f Rhythmus=%.2f | Stoer: Muster=%.2f "
-        "Rhythmus=%.2f",
-        label, s.levelRatio, fminf(s.steadiness, 20.0f), s.similarity, s.periodicity, s.rhythm,
-        s.noiseSimilarity, s.noiseRhythm);
+    add("  %-6s Pegel=%.2f Schwankung=%.1fdB KI-Pumpe=%.0f%%", label, s.levelRatio, fminf(s.steadiness, 20.0f),
+        s.clsPump * 100.0f);
   };
 
   out = "=== Coffee Timer Diagnose ===\n";
@@ -303,16 +306,12 @@ void App::diagnosticsText(String& out) {
       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
   const PumpProfile& p = profile_;
-  add("Profil: gueltig=%d Aufnahmen=%u Muster=%u Takt=%d (%.1f Hz, Lag %.0f) RhythmusSchwelle=%.2f "
-      "SchwankungMax=%.1fdB",
-      p.valid, p.recordings, p.templateCount, p.periodic, p.periodHz(), p.periodLag,
-      p.rhythmThreshold, p.steadyThreshold);
-  add("        Hintergrund %.1f dB, Pumpe(leise) %.1f dB, Qualitaet %.0f, Stoergeraeusche %u",
-      p.bgRmsDb, p.pumpRmsDb, p.quality, noise_.count);
+  add("Profil: gueltig=%d Aufnahmen=%u SchwankungMax=%.1fdB Hintergrund %.1f dB, Pumpe(leise) %.1f dB, "
+      "Qualitaet %.0f, Stoergeraeusche %u",
+      p.valid, p.recordings, p.steadyThreshold, p.bgRmsDb, p.pumpRmsDb, p.quality, noise_.count);
   const DetectorSettings& s = settings_;
-  add("Schwellen: Muster=%.2f Takt=%.2f Pegel=%.2f Ein=%ums Aus=%ums MinBezug=%.0fs",
-      s.similarityThreshold, s.periodicityThreshold, s.levelThreshold, s.onDelayMs, s.offDelayMs,
-      s.minShotSeconds);
+  add("Schwellen: Pegel=%.2f KI=%.2f (halten %.2f) Ein=%ums Aus=%ums MinBezug=%.0fs", s.levelThreshold,
+      cfg::kClsMinProb, cfg::kClsHoldProb, s.onDelayMs, s.offDelayMs, s.minShotSeconds);
   if (!lastPumpTeach_.isEmpty()) out += "Teach Pumpe: " + lastPumpTeach_ + "\n";
   if (!lastNoiseTeach_.isEmpty()) out += "Teach Stoer: " + lastNoiseTeach_ + "\n";
 
@@ -327,20 +326,23 @@ void App::diagnosticsText(String& out) {
   {
     String names;
     for (uint8_t i = 0; i < grinders_.count; ++i) {
-      names += (i ? ", " : "") + String(grinders_.names[i]) + " (" +
-               String(grinders_.entries[i].templateCount) + " Muster)";
+      const NoiseProfile::Entry& e = grinders_.entries[i];
+      char lvl[48];
+      snprintf(lvl, sizeof(lvl), " (Pegel %.1f / Hintergrund %.1f dB)", e.levelDb, e.bgRmsDb);
+      names += (i ? ", " : "") + String(grinders_.names[i]) + lvl;
     }
     add("Muehlen: %u [%s], erkannt %lu x, Dosier-Tara %s, Dosis %.1f g", grinders_.count,
         names.c_str(), (unsigned long)grinderStarts_, scale::doseMode() ? "aktiv" : "aus", doseG_);
   }
 
   {
-    size_t perKind[4] = {};
-    for (const classifier::Record& r : training_.records) perKind[static_cast<int>(r.kind)] += r.count();
-    add("KI-Erkennung: %s, %s, %u Klassen, Trefferquote %.0f%%, Klangbilder: Pumpe %u, Muehlen %u, "
-        "Stoer %u, Ruhe %u", useClassifier_ ? "an" : "aus", classifier_.ready() ? "trainiert" : "nicht trainiert",
-        (unsigned)classifier_.classCount(), classifier_.trainingAccuracy() * 100.0f, (unsigned)perKind[0],
-        (unsigned)perKind[1], (unsigned)perKind[2], (unsigned)perKind[3]);
+    size_t perKind[4];
+    countFrames(training_, perKind);
+    add("KI-Erkennung: %s, %u Klassen, Trefferquote %.0f%%, Aufnahmen %u, Klangbilder: Pumpe %u, Muehlen %u, "
+        "Stoer %u, Ruhe %u", classifier_.ready() ? "trainiert" : "nicht trainiert (Standardprofil)",
+        (unsigned)classifier_.classCount(), classifier_.trainingAccuracy() * 100.0f,
+        (unsigned)training_.records.size(), (unsigned)perKind[0], (unsigned)perKind[1], (unsigned)perKind[2],
+        (unsigned)perKind[3]);
     const FrameScores& sc = detector_.status().scores;
     if (sc.clsActive) {
       add("  live: %s %u (%.0f%%), Pumpe %.0f%%", classifier::kindName(sc.clsKind), sc.clsIndex + 1,
@@ -392,8 +394,8 @@ void App::snapshot(StatusSnapshot& out) {
   memcpy(out.grinderNames, grinders_.names, sizeof(out.grinderNames));
   out.grinderActive = detector_.status().grinderIndex;
   out.grinderOn = detector_.status().grinderOn;
-  out.clsEnabled = useClassifier_;
   out.clsReady = classifier_.ready();
+  out.clsPumpKnown = classifier_.hasKind(classifier::Kind::Pump);
   out.clsClasses = classifier_.classCount();
   out.clsFrames = classifier_.frameCount();
   out.clsAccuracy = classifier_.trainingAccuracy();
@@ -414,12 +416,9 @@ void App::snapshot(StatusSnapshot& out) {
   out.profileBgDb = profile_.bgRmsDb;
   out.profilePumpDb = profile_.pumpRmsDb;
   out.profileQuality = profile_.quality;
-  out.profileTemplates = profile_.templateCount;
   out.profileRecordings = profile_.recordings;
-  out.profilePeriodHz = profile_.periodHz();
   out.noiseCount = noise_.count;
-  out.profileRhythmTh = profile_.rhythmThreshold;
-  out.profileSteadyTh = profile_.steadyThreshold;
+  out.profileSteadyTh = profile_.isDefault() ? cfg::kDefaultSteadyDb : profile_.steadyThreshold;
 
   out.detector = detector_.status();
   out.settings = settings_;
@@ -450,8 +449,7 @@ void App::cmdStartTeach(TeachMode mode) {
   Lock lock(mutex_);
   // Standardprofil: Bezugsgröße ist der automatisch gemessene Raumpegel,
   // nicht der feste Startwert (vor reset() auslesen).
-  static PumpProfile ref;
-  ref = profile_;
+  PumpProfile ref = profile_;
   if (ref.isDefault()) {
     ref.bgRmsDb = detector_.status().bgDb;
     ref.pumpRmsDb = ref.bgRmsDb + cfg::kDefaultSpanDb;
@@ -459,7 +457,7 @@ void App::cmdStartTeach(TeachMode mode) {
   }
   timer_.reset();
   detector_.reset();
-  teach_.start(millis(), mode, settings_, ref, noise_, &grinders_, micGain_);
+  teach_.start(millis(), mode, settings_, ref, &grinders_, noise_.count, &classifier_, micGain_);
   Serial.println("[teach] gestartet");
 }
 
@@ -475,43 +473,39 @@ void App::cmdFinishTeach() {
   teach_.finish();
 }
 
-bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
+bool App::cmdSaveTeach(bool add, String* note) {
   Lock lock(mutex_);
   if (teach_.phase() != TeachPhase::Done || teach_.result().quality == TeachQuality::Error) {
     return false;
   }
   const TeachResult& r = teach_.result();
   String msg;
+  uint8_t parts = 0;
 
   // Kennwerte für den Diagnosebericht merken.
   char info[220];
   if (isNoiseMode(r.mode)) {
-    snprintf(info, sizeof(info), "%s: vorher %.0f%% nachher %.0f%% (%.1f s) bg %.1f dB pegel %.1f dB "
-             "schwelle %.2f", r.mode == TeachMode::Grinder ? "Muehle" : "Stoer", r.noiseHitBefore * 100.0f,
-             r.noiseHitAfter * 100.0f, r.activeSeconds, r.noise.bgRmsDb, r.noise.levelDb,
-             r.noise.simThreshold);
+    snprintf(info, sizeof(info), "%s: bisher als Pumpe %.0f%% (%.1f s) bg %.1f dB pegel %.1f dB %s",
+             r.mode == TeachMode::Grinder ? "Muehle" : "Stoer", r.clsAsPump * 100.0f, r.activeSeconds,
+             r.noise.bgRmsDb, r.noise.levelDb, add ? "(ergaenzt)" : "");
     lastNoiseTeach_ = info;
   } else {
-    snprintf(info, sizeof(info),
-             "snr=%.1f cov=%.2f takt=%.0fHz per(p10)=%.2f/bg %.2f rhy(p5)=%.2f/bg %.2f "
-             "sim(p5)=%.2f/bg %.2f schwankung(p95)=%.1fdB kontrast=%.1fdB muster=%u %.1fs %s",
-             r.snrDb, r.coverage, r.profile.periodHz(), r.pumpPeriodicity, r.bgPeriodicity,
-             r.pumpRhythm, r.bgRhythm, r.selfSimilarity, r.bgSimilarity, r.pumpSteadiness,
-             r.contrastDb, r.profile.templateCount, r.activeSeconds, add ? "(ergaenzt)" : "");
+    snprintf(info, sizeof(info), "snr=%.1f bgStd=%.1f schwankung(p95)=%.1fdB pause=%.1fs ki-pumpe=%.0f%% %.1fs %s",
+             r.snrDb, r.bgStdDb, r.pumpSteadiness, r.longestPauseMs / 1000.0f, r.clsAsPump * 100.0f,
+             r.activeSeconds, add ? "(ergaenzt)" : "");
     lastPumpTeach_ = info;
   }
 
   if (r.mode == TeachMode::Grinder) {
-    // Mühle: neue Mühle anlegen oder einer vorhandenen hinzufügen (ähnlichste
-    // bzw. wenn die Liste voll ist)
+    // Mühle: neue Mühle anlegen oder einer vorhandenen hinzufügen (die von der
+    // KI erkannte bzw. die erste, wenn die Liste voll ist)
     GrinderProfile& g = grinders_;
     const bool full = g.count >= cfg::kMaxGrinders;
     if ((add || full) && g.count > 0) {
       const uint8_t target = r.grinderMatch >= 0 && r.grinderMatch < g.count ? r.grinderMatch : 0;
       PumpDetector::mergeNoise(g.entries[target], r.noise);
       learnFromTeachLocked(classifier::Kind::Grinder, target, false);
-      msg = String(g.names[target]) + " ergänzt (" + String(g.entries[target].templateCount) +
-            " Klangmuster)" + (full && !add ? " – Liste voll" : "");
+      msg = String(g.names[target]) + " ergänzt" + (full && !add ? " – Liste voll" : "");
     } else {
       const uint8_t i = g.count++;
       g.entries[i] = r.noise;
@@ -519,108 +513,68 @@ bool App::cmdSaveTeach(bool add, String* note, bool keepSettings) {
       learnFromTeachLocked(classifier::Kind::Grinder, i, false);
       msg = String(g.names[i]) + " gespeichert";
     }
-    detector_.reset();
-    teach_.cancel();
-    if (!persistLocked(settings::kPartGrinders)) msg = "FEHLER: Mühle konnte nicht gespeichert werden!";
-    Serial.printf("[teach] %s\n", msg.c_str());
-    if (note) *note = msg;
-    return true;
-  }
-
-  if (r.mode == TeachMode::Noise && add && noise_.count > 0) {
-    // Weitere Aufnahme desselben Geräts: in das ähnlichste Störgeräusch übernehmen
-    const uint8_t target = r.noiseMatch >= 0 && r.noiseMatch < noise_.count ? r.noiseMatch : noise_.count - 1;
-    PumpDetector::mergeNoise(noise_.entries[target], r.noise);
-    learnFromTeachLocked(classifier::Kind::Noise, target, false);
-    detector_.setNoise(noise_);
-    detector_.reset();
-    teach_.cancel();
-    msg = persistLocked(settings::kPartNoise)
-              ? "Störgeräusch " + String(target + 1) + " ergänzt (" + String(noise_.entries[target].templateCount) +
-                    " Klangmuster)"
-              : String("FEHLER: Störgeräusch konnte nicht gespeichert werden!");
-    Serial.printf("[teach] %s\n", msg.c_str());
-    if (note) *note = msg;
-    return true;
-  }
-
-  if (isNoiseMode(r.mode)) {
-    // Störgeräusch anhängen; ist die Liste voll, fällt das älteste heraus.
-    if (noise_.count >= cfg::kMaxNoises) {
-      memmove(&noise_.entries[0], &noise_.entries[1],
-              sizeof(NoiseProfile::Entry) * (cfg::kMaxNoises - 1));
-      --noise_.count;
-      training_.removeEntry(classifier::Kind::Noise, 0);  // Trainingsdaten mitverschieben
+    parts = settings::kPartGrinders;
+  } else if (r.mode == TeachMode::Noise) {
+    if (add && noise_.count > 0) {
+      // Weitere Aufnahme desselben Geräts: in das von der KI erkannte Störgeräusch übernehmen
+      const uint8_t target =
+          r.noiseMatch >= 0 && r.noiseMatch < noise_.count ? r.noiseMatch : noise_.count - 1;
+      PumpDetector::mergeNoise(noise_.entries[target], r.noise);
+      learnFromTeachLocked(classifier::Kind::Noise, target, false);
+      msg = "Störgeräusch " + String(target + 1) + " ergänzt";
+    } else {
+      // Anhängen; ist die Liste voll, fällt das älteste heraus (wurde vorher angekündigt).
+      if (noise_.count >= cfg::kMaxNoises) {
+        memmove(&noise_.entries[0], &noise_.entries[1], sizeof(NoiseProfile::Entry) * (cfg::kMaxNoises - 1));
+        --noise_.count;
+        training_.removeEntry(classifier::Kind::Noise, 0);  // Trainingsdaten mitverschieben
+      }
+      noise_.entries[noise_.count++] = r.noise;
+      learnFromTeachLocked(classifier::Kind::Noise, noise_.count - 1, false);
+      msg = "Störgeräusch gespeichert (" + String(noise_.count) + " gelernt)";
     }
-    noise_.entries[noise_.count++] = r.noise;
-    learnFromTeachLocked(classifier::Kind::Noise, noise_.count - 1, false);
-    detector_.setNoise(noise_);
-    detector_.reset();
-    teach_.cancel();
-    const bool ok = persistLocked(settings::kPartNoise);
-    msg = ok ? "Störgeräusch gespeichert (" + String(noise_.count) + " gelernt)"
-             : String("FEHLER: Störgeräusch konnte nicht gespeichert werden!");
-    Serial.printf("[teach] %s\n", msg.c_str());
-    if (note) *note = msg;
-    return true;
-  }
-
-  const DetectorSettings before = settings_;  // für den Änderungsbericht / "beibehalten"
-  if (add && profile_.valid && !profile_.isDefault()) {
-    // Ergänzen: Muster anhängen; Schwellen so wählen, dass beide Aufnahmen
-    // erkannt werden (jeweils die tolerantere). Die neue Aufnahme vorher auf
-    // die Mikrofon-Verstärkung des bestehenden Profils umrechnen.
-    static PumpProfile incoming;
-    incoming = r.profile;
-    const float offset = PumpDetector::gainOffsetDb(profile_.micGain, r.profile.micGain);
-    incoming.bgRmsDb += offset;
-    incoming.pumpRmsDb += offset;
-    for (float& b : incoming.bgBandDb) b += offset;
-    const bool wasPeriodic = profile_.periodic;
-    PumpDetector::mergeProfile(profile_, incoming, msg);
-    learnFromTeachLocked(classifier::Kind::Pump, 0, false);
-    settings_.similarityThreshold = fminf(settings_.similarityThreshold, r.suggestedSimilarity);
-    if (profile_.periodic && wasPeriodic) {
-      settings_.periodicityThreshold = fminf(settings_.periodicityThreshold, r.suggestedPeriodicity);
+    parts = settings::kPartNoise;
+  } else {
+    const uint16_t offBefore = settings_.offDelayMs;
+    if (add && profile_.valid && !profile_.isDefault()) {
+      // Ergänzen: Pegel so zusammenführen, dass beide Aufnahmen erkannt werden.
+      // Die neue Aufnahme vorher auf die Mikrofon-Verstärkung des Profils umrechnen.
+      PumpProfile incoming = r.profile;
+      const float offset = PumpDetector::gainOffsetDb(profile_.micGain, r.profile.micGain);
+      incoming.bgRmsDb += offset;
+      incoming.pumpRmsDb += offset;
+      PumpDetector::mergeProfile(profile_, incoming);
+      learnFromTeachLocked(classifier::Kind::Pump, 0, false);
+      msg = "Profil ergänzt";
+    } else {
+      // Ersetzen: Pegel aus der Aufnahme, bisherige Pumpen-Aufnahmen der KI ersetzen.
+      profile_ = r.profile;
+      learnFromTeachLocked(classifier::Kind::Pump, 0, true);
+      msg = "Profil gespeichert";
     }
-    if (msg.isEmpty()) msg = "Profil ergänzt";
-  } else {
-    // Ersetzen: Profil und Schwellen komplett aus der Aufnahme übernehmen.
-    profile_ = r.profile;
-    learnFromTeachLocked(classifier::Kind::Pump, 0, true);  // alte Pumpen-Aufnahmen ersetzen
-    // micGain kommt aus der Aufnahme (Verstärkung beim Teach)
-    settings_.similarityThreshold = r.suggestedSimilarity;
-    settings_.periodicityThreshold = r.suggestedPeriodicity;
-    msg = "Profil gespeichert";
-  }
-  if (r.suggestedOffDelayMs > settings_.offDelayMs) settings_.offDelayMs = r.suggestedOffDelayMs;
-  settings::clamp(settings_);
-
-  // Schwellen: auf Wunsch die bisherigen behalten, sonst die Änderungen melden
-  if (keepSettings) {
-    settings_ = before;
-    msg += " – Schwellen unverändert";
-  } else {
-    String changes;
-    auto diff = [&](const char* label, float a, float b, const char* fmt) {
-      if (fabsf(a - b) < 0.005f) return;
+    // Ausschaltverzögerung nur verlängern (Pause in der Aufnahme) – und melden.
+    if (r.suggestedOffDelayMs > settings_.offDelayMs) settings_.offDelayMs = r.suggestedOffDelayMs;
+    settings::clamp(settings_);
+    if (settings_.offDelayMs != offBefore) {
       char buf[64];
-      snprintf(buf, sizeof(buf), fmt, label, a, b);
-      changes += (changes.isEmpty() ? "" : ", ") + String(buf);
-    };
-    diff("Muster-Schwelle", before.similarityThreshold, settings_.similarityThreshold, "%s %.2f → %.2f");
-    diff("Takt-Schwelle", before.periodicityThreshold, settings_.periodicityThreshold, "%s %.2f → %.2f");
-    diff("Ausschaltverz.", before.offDelayMs / 1000.0f, settings_.offDelayMs / 1000.0f, "%s %.1f → %.1f s");
-    if (!changes.isEmpty()) msg += ". Geändert: " + changes;
+      snprintf(buf, sizeof(buf), ". Ausschaltverz. %.1f → %.1f s", offBefore / 1000.0f, settings_.offDelayMs / 1000.0f);
+      msg += buf;
+    }
+    detector_.setProfile(profile_);
+    detector_.setSettings(settings_);
+    parts = settings::kPartPump;
   }
-  if (!persistLocked(settings::kPartPump)) msg = "FEHLER: Profil konnte nicht gespeichert werden!";
-  detector_.setProfile(profile_);
-  detector_.setSettings(settings_);
-  teach_.cancel();
 
-  Serial.printf("[teach] %s: %u Muster, %u Aufnahme(n), Takt %.0f Hz, sim>=%.2f per>=%.2f\n",
-                msg.c_str(), profile_.templateCount, profile_.recordings, profile_.periodHz(),
-                settings_.similarityThreshold, settings_.periodicityThreshold);
+  if (!persistLocked(parts)) msg = "FEHLER: konnte nicht gespeichert werden!";
+  // Ergebnis der neu trainierten KI anhängen
+  if (classifier_.ready()) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), " – KI neu trainiert (Trefferquote %.0f %%)", classifier_.trainingAccuracy() * 100.0f);
+    msg += buf;
+  }
+  detector_.reset();
+  teach_.cancel();
+  Serial.printf("[teach] %s\n", msg.c_str());
   if (note) *note = msg;
   return true;
 }
@@ -654,7 +608,6 @@ void App::cmdClearNoise() {
   training_.removeKind(classifier::Kind::Noise);
   retrainLocked(true);
   persistLocked(settings::kPartNoise);
-  detector_.setNoise(noise_);
   Serial.println("[teach] Störgeräusche gelöscht");
 }
 
@@ -666,21 +619,8 @@ bool App::cmdDeleteNoise(uint8_t index) {
   --noise_.count;
   training_.removeEntry(classifier::Kind::Noise, index);
   retrainLocked(true);
-  detector_.setNoise(noise_);
   Serial.printf("[profil] Störgeräusch %u gelöscht\n", index + 1);
   return persistLocked(settings::kPartNoise);
-}
-
-bool App::cmdDeleteTemplate(uint8_t index) {
-  Lock lock(mutex_);
-  // Mindestens ein Muster muss bleiben, sonst wäre das Profil unbrauchbar.
-  if (index >= profile_.templateCount || profile_.templateCount <= 1) return false;
-  memmove(profile_.templates[index], profile_.templates[index + 1],
-          sizeof(profile_.templates[0]) * (profile_.templateCount - index - 1));
-  --profile_.templateCount;
-  detector_.setProfile(profile_);
-  Serial.printf("[profil] Klangmuster %u gelöscht\n", index + 1);
-  return persistLocked(settings::kPartPump);
 }
 
 void App::cmdResetTimer(bool withScale) {
@@ -729,10 +669,8 @@ void App::summarize(const ProfileSlot& s, bool stored, SlotSummary& out) {
   out.stored = stored;
   out.isDefault = s.pump.isDefault();
   out.recordings = s.pump.recordings;
-  out.templates = s.pump.templateCount;
   out.noiseCount = s.noise.count;
   out.grinderCount = s.grinders.count;
-  out.periodHz = s.pump.periodHz();
   out.quality = s.pump.quality;
 }
 
@@ -746,7 +684,6 @@ void App::loadSlotLocked(uint8_t slot) {
   grinders_ = slotBuf().grinders;
   memcpy(slotName_, slotBuf().name, sizeof(slotName_));
   detector_.setProfile(profile_);
-  detector_.setNoise(noise_);
   detector_.setSettings(settings_);
   settings::loadTraining(activeSlot_, training_);
   retrainLocked(false);
@@ -848,37 +785,36 @@ bool App::exportSlot(uint8_t slot, String& name, String& pump, String& grinders,
          settings::encodeTraining(slot == activeSlot_ ? training_ : other, training);
 }
 
-namespace {
-/// Klangmuster als Mini-Diagramm: ein Blockzeichen je Band (-1..1 -> ▁..█).
-String patternBar(const float* t) {
-  static const char* const kBlocks[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
-  String s = "|";
-  for (size_t b = 0; b < cfg::kNumBands; ++b) {
-    const int i = constrain(static_cast<int>((t[b] + 1.0f) * 0.5f * 8.999f), 0, 8);
-    s += kBlocks[i];
-  }
-  return s + "|";
-}
-}  // namespace
-
 bool App::slotText(uint8_t slot, String& out) {
   if (slot >= cfg::kProfileSlots) return false;
   Lock lock(mutex_);
   const ProfileSlot& s = slotLocked(slot);
+  // Trainingsdaten: aktiver Slot aus dem Speicher, sonst aus der Datei
+  classifier::TrainingSet other;
+  if (slot != activeSlot_) settings::loadTraining(slot, other);
+  const classifier::TrainingSet& t = slot == activeSlot_ ? training_ : other;
   char buf[220];
   auto add = [&](const char* fmt, auto... args) {
     snprintf(buf, sizeof(buf), fmt, args...);
     out += buf;
     out += '\n';
   };
-  auto patterns = [&](const float (*t)[cfg::kNumBands], size_t n) {
-    for (size_t i = 0; i < n; ++i) out += "  " + String(i + 1) + ": " + patternBar(t[i]) + "\n";
+  // Aufnahmen und Klangbilder der KI je Eintrag
+  auto training = [&](classifier::Kind kind, uint8_t index) {
+    size_t records = 0, frames = 0;
+    for (const classifier::Record& r : t.records) {
+      if (r.kind == kind && (kind == classifier::Kind::Pump || kind == classifier::Kind::Background || r.index == index)) {
+        ++records;
+        frames += r.count();
+      }
+    }
+    char b[64];
+    snprintf(b, sizeof(b), "KI: %u Aufnahme(n), %u Klangbilder", (unsigned)records, (unsigned)frames);
+    return String(b);
   };
-  auto sound = [&](const char* title, const NoiseProfile::Entry& e) {
-    add("%s: %u Klangmuster, eigener Hintergrund %.1f dBFS, Pegel %.1f dBFS (Abstand %.1f dB), "
-        "Schwelle %.2f, Mikrofon-Verstärkung %.0f", title, e.templateCount, e.bgRmsDb, e.levelDb,
-        e.levelDb - e.bgRmsDb, e.simThreshold, e.micGain);
-    patterns(e.templates, e.templateCount);
+  auto sound = [&](const char* title, const NoiseProfile::Entry& e, classifier::Kind kind, uint8_t index) {
+    add("%s: eigener Hintergrund %.1f dBFS, Pegel %.1f dBFS (Abstand %.1f dB), Mikrofon-Verstärkung %.0f – %s",
+        title, e.bgRmsDb, e.levelDb, e.levelDb - e.bgRmsDb, e.micGain, training(kind, index).c_str());
   };
 
   out = "";
@@ -890,40 +826,35 @@ bool App::slotText(uint8_t slot, String& out) {
   if (p.isDefault()) {
     add("Standardprofil (noch kein Teach) – erkannt wird jedes gleichmäßige Geräusch über dem Raumpegel.");
   } else {
-    add("Aufnahmen %u, Klangmuster %u, Qualität %.0f/100, Mikrofon-Verstärkung %.0f", p.recordings,
-        p.templateCount, p.quality, p.micGain);
+    add("Aufnahmen %u, Qualität %.0f/100, Mikrofon-Verstärkung %.0f", p.recordings, p.quality, p.micGain);
     add("Hintergrund %.1f dBFS, Pumpe (leiser Teil) %.1f dBFS, Abstand %.1f dB", p.bgRmsDb, p.pumpRmsDb,
         p.pumpRmsDb - p.bgRmsDb);
-    if (p.periodic) {
-      add("Takt: %.1f Hz (Vibrationspumpe), Rhythmus-Schwelle %.2f", p.periodHz(), p.rhythmThreshold);
-    } else {
-      add("Takt: keiner (z. B. Rotationspumpe) – erkannt über die Klangmuster");
-    }
     add("Max. Pegelschwankung %.1f dB", p.steadyThreshold);
-    add("Klangmuster (40 Bänder, 80 Hz links -> 7 kHz rechts; hoch = relativ stärker):");
-    patterns(p.templates, p.templateCount);
   }
+  add("%s", training(classifier::Kind::Pump, 0).c_str());
 
   const DetectorSettings& st = s.settings;
   add("\n== Einstellungen ==");
-  add("Muster-Schwelle %.2f, Takt-Schwelle %.2f, Pegel-Schwelle %.2f", st.similarityThreshold,
-      st.periodicityThreshold, st.levelThreshold);
+  add("Pegel-Schwelle %.2f, KI-Wahrscheinlichkeit Start %.0f %% / Halten %.0f %%", st.levelThreshold,
+      cfg::kClsMinProb * 100.0f, cfg::kClsHoldProb * 100.0f);
   add("Einschaltverzögerung %u ms, Ausschaltverzögerung %u ms, Mindestdauer %.0f s", st.onDelayMs,
       st.offDelayMs, st.minShotSeconds);
 
   add("\n== Mühlen: %u ==", s.grinders.count);
   for (uint8_t i = 0; i < s.grinders.count; ++i) {
-    sound((String("\"") + s.grinders.names[i] + "\"").c_str(), s.grinders.entries[i]);
+    sound((String("\"") + s.grinders.names[i] + "\"").c_str(), s.grinders.entries[i], classifier::Kind::Grinder, i);
   }
   add("\n== Störgeräusche: %u ==", s.noise.count);
   for (uint8_t i = 0; i < s.noise.count; ++i) {
-    sound(("Störgeräusch " + String(i + 1)).c_str(), s.noise.entries[i]);
+    sound(("Störgeräusch " + String(i + 1)).c_str(), s.noise.entries[i], classifier::Kind::Noise, i);
   }
+  add("\n== Ruhe ==");
+  add("%s (aus den Hintergrund-Phasen der Teachs)", training(classifier::Kind::Background, 0).c_str());
   return true;
 }
 
 bool App::cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const String& grinders,
-                        const String& noise, const String& legacy, const String& training) {
+                        const String& noise, const String& training) {
   parts &= settings::kPartAll;
   if (slot >= cfg::kProfileSlots || !parts) return false;
   Lock lock(mutex_);
@@ -933,14 +864,10 @@ bool App::cmdImportSlot(uint8_t slot, uint8_t parts, const String& pump, const S
     return new (mem ? mem : malloc(sizeof(ProfileSlot))) ProfileSlot();
   }();
   settings::defaultSlot(slot, *src);
-  if (!legacy.isEmpty()) {
-    if (!settings::decodeSlot(legacy, *src)) return false;
-  } else {
-    const struct { uint8_t part; const String& text; } in[] = {
-        {settings::kPartPump, pump}, {settings::kPartGrinders, grinders}, {settings::kPartNoise, noise}};
-    for (const auto& i : in) {
-      if ((parts & i.part) && !settings::decodePart(i.text, i.part, *src)) return false;
-    }
+  const struct { uint8_t part; const String& text; } in[] = {
+      {settings::kPartPump, pump}, {settings::kPartGrinders, grinders}, {settings::kPartNoise, noise}};
+  for (const auto& i : in) {
+    if ((parts & i.part) && !settings::decodePart(i.text, i.part, *src)) return false;
   }
   // Ziel: aktueller Stand des Slots, nur die gewählten Teile ersetzen
   if (slot == activeSlot_ && settingsDirty_) persistLocked(settings::kPartPump);
@@ -1019,14 +946,6 @@ void App::retrainLocked(bool save) {
                 classifier_.ready() ? "trainiert" : "nicht einsatzbereit", (unsigned)classifier_.classCount(),
                 (unsigned)classifier_.frameCount(), classifier_.trainingAccuracy() * 100.0f,
                 (unsigned long)(millis() - t0));
-}
-
-void App::cmdSetUseClassifier(bool on) {
-  Lock lock(mutex_);
-  useClassifier_ = on;
-  settings::saveUseClassifier(on);
-  detector_.setClassifier(&classifier_, on);
-  detector_.reset();
 }
 
 void App::cmdSetMicGain(uint8_t gain) {

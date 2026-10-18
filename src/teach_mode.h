@@ -2,43 +2,34 @@
 // Copyright (C) 2026 uc-david
 /**
  * @file teach_mode.h
- * @brief Teach-Modus: Lernen von Ruhe, Pumpe, Mühle und Störgeräuschen.
+ * @brief Teach-Modus: Lernen von Pumpe, Mühle und Störgeräuschen.
  *
  * Die Modi sind einzeln wählbar und völlig unabhängig voneinander: Jede
  * Aufnahme beginnt mit ihrer eigenen Ruhe (3 s) und speichert eigenen
- * Hintergrund, Pegel, Schwelle und Mikrofon-Verstärkung. Die Reihenfolge des
- * Einlernens spielt keine Rolle.
- *  - Pumpe:        siehe unten
- *  - Mühle:        wie Störgeräusch; wird als neue Mühle gespeichert oder
- *                  einer vorhandenen Mühle hinzugefügt (eigene Liste)
- *  - Störgeräusch: z. B. Milchaufschäumer – wird ignoriert
+ * Hintergrund, Pegel und Mikrofon-Verstärkung. Die Reihenfolge des
+ * Einlernens spielt keine Rolle. Die Klangbilder der Aufnahme (und ihrer
+ * Ruhe) übernimmt die KI-Erkennung als Trainingsdaten (trainingFrames()).
  *
- * Modus "Pumpe":
- *   1. Background  – Pumpe AUS, Hintergrundgeräusch wird aufgenommen (3 s)
- *   2. WaitPump    – Benutzer startet einen Bezug; gewartet wird auf einen
- *                    deutlichen Pegelanstieg (max. 20 s)
- *   3. RecordPump  – Aufnahme läuft, solange die Pumpe läuft. Ende automatisch,
- *                    wenn die Pumpe 4 s still ist, per "Fertig" oder nach 60 s.
+ * Ablauf:
+ *   1. Background  – Gerät AUS, Hintergrundgeräusch wird aufgenommen (3 s)
+ *   2. WaitPump    – Benutzer startet Bezug / Mühle / Störgeräusch; gewartet
+ *                    wird auf einen deutlichen Pegelanstieg (max. 20 s)
+ *   3. RecordPump  – Aufnahme, solange es hörbar ist. Pumpe: Ende nach 4 s
+ *                    Stille (Pre-Infusion wird überbrückt), per "Fertig" oder
+ *                    nach 60 s; Mühle/Störgeräusch: nach 1,5 s Stille (max. 30 s)
  *   4. Done        – Auswertung:
- *                    - bis zu 3 Klangmuster (Anlauf/Druckaufbau/voller Druck)
- *                    - Pumpentakt und Rhythmus-Fingerabdruck (Autokorrelation)
- *                    - passende Schwellen werden aus der Aufnahme berechnet
- *                    - Bewertung OK / Warnung / Fehler mit Begründung, u. a.
- *                      welcher Anteil der Aufnahme damit erkannt würde
- *                    Ergebnis kann das Profil ersetzen oder ergänzen.
- *
- * Modus "Störgeräusch" / "Mühle":
- *   1. Background  – eigener Hintergrund (3 s)
- *   2. WaitPump    – Benutzer schaltet das Geräusch ein
- *   3. RecordPump  – Aufnahme, bis es 1,5 s still ist (max. 30 s)
- *   4. Done        – Klangmuster + Rhythmus des Störgeräuschs; Anzeige, wie oft
- *                    es bisher als Pumpe erkannt wurde und wie oft danach.
+ *                    - Pegel (Hintergrund, leiser Teil), Gleichmäßigkeit, Pausen
+ *                    - Bewertung OK / Warnung / Fehler mit Begründung
+ *                    - was die bisherige KI in der Aufnahme hört
+ *                    Ergebnis kann ersetzen (Pumpe), als neuer Eintrag
+ *                    gespeichert (Mühle/Störgeräusch) oder ergänzt werden.
  */
 #pragma once
 
 #include <vector>
 
 #include "audio_features.h"
+#include "classifier.h"
 #include "settings.h"
 
 enum class TeachPhase { Idle, Background, WaitPump, RecordPump, Done };
@@ -65,36 +56,24 @@ struct TeachResult {
   float clipRatio = 0.0f;        ///< Anteil übersteuerter Samples
   float activeSeconds = 0.0f;    ///< hörbare Laufzeit in der Aufnahme
   uint32_t longestPauseMs = 0;   ///< längste Pause (z. B. Pre-Infusion)
-  float coverage = 0.0f;         ///< Anteil der Pumpen-Frames, die erkannt würden
-  float falseRatio = 0.0f;       ///< Anteil der Hintergrund-Frames, die auslösen würden
-  float rejectedRatio = 0.0f;    ///< Anteil der Pumpe, der als Störgeräusch verworfen würde
-  float selfSimilarity = 0.0f;   ///< Klangmuster-Ähnlichkeit der Pumpe (5 %-Perzentil)
-  float bgSimilarity = 0.0f;     ///< Klangmuster-Ähnlichkeit des Hintergrunds (90 %)
-  float pumpPeriodicity = 0.0f;  ///< Takt-Stärke der Pumpe (10 %-Perzentil)
-  float bgPeriodicity = 0.0f;    ///< Takt-Stärke des Hintergrunds (90 %-Perzentil)
-  float pumpRhythm = 0.0f;       ///< Rhythmus-Form der Pumpe (5 %-Perzentil)
-  float bgRhythm = 0.0f;         ///< Rhythmus-Form des Hintergrunds (90 %-Perzentil)
   float pumpSteadiness = 0.0f;   ///< Pegelschwankung der Pumpe in dB (95 %-Perzentil)
-  float contrastDb = 0.0f;       ///< Ausprägung der Klangfarbe (Streuung über die Bänder)
-  int distinctBands = 0;         ///< Bänder mit deutlichem Pumpenanteil
+  uint16_t trainFrames = 0;      ///< Klangbilder dieser Aufnahme für die KI
 
-  // Störgeräusch-Modus
-  float noiseHitBefore = 0.0f;   ///< Anteil, der bisher als Pumpe erkannt wurde
-  float noiseHitAfter = 0.0f;    ///< Anteil mit gespeichertem Störgeräusch
-  NoiseProfile::Entry noise;     ///< gelerntes Störgeräusch / gelernte Mühle
-  int8_t grinderMatch = -1;      ///< Mühle: ähnlichste vorhandene Mühle (-1 = keine)
-  float grinderMatchSim = 0.0f;  ///< deren Klangmuster-Ähnlichkeit 0..1
-  int8_t noiseMatch = -1;        ///< Störgeräusch: ähnlichstes vorhandenes (-1 = keines)
-  float noiseMatchSim = 0.0f;
+  // Was die bisherige KI in der Aufnahme hört (vor dem Speichern)
+  bool clsReady = false;         ///< KI war schon trainiert
+  float clsAsPump = 0.0f;        ///< Anteil, der als Pumpe erkannt würde (Erkennung wie im Betrieb)
+  int8_t grinderMatch = -1;      ///< Mühle: von der KI am häufigsten erkannte Mühle (-1 = keine)
+  float grinderMatchShare = 0.0f;///< Anteil der Klangbilder, die dieser Mühle zugeordnet werden
+  int8_t noiseMatch = -1;        ///< Störgeräusch: dito
+  float noiseMatchShare = 0.0f;
 
   // Aus der Aufnahme berechnete Einstellungen (werden beim Speichern übernommen)
-  float suggestedSimilarity = 0.75f;
-  float suggestedPeriodicity = 0.4f;
   uint16_t suggestedOffDelayMs = 700;
 
   char messages[kMaxMessages][kMessageLen] = {};  ///< Begründungen (UTF-8)
   uint8_t messageCount = 0;
-  PumpProfile profile;           ///< gelerntes Profil (nur bei !Error speicherbar)
+  PumpProfile profile;           ///< Pumpe: gelernte Pegel (nur bei !Error speicherbar)
+  NoiseProfile::Entry noise;     ///< Mühle / Störgeräusch: gelernte Pegel
 
   /// Fügt eine formatierte Meldung hinzu (printf-Syntax).
   void addMessage(const char* fmt, ...);
@@ -107,16 +86,16 @@ class TeachController {
 
   /**
    * Startet einen neuen Teach-Durchlauf.
-   * @param mode     Pumpe oder Störgeräusch
+   * @param mode     Pumpe, Mühle oder Störgeräusch
    * @param current  aktuelle Einstellungen
-   * @param profile  aktuelles Pumpenprofil (Störgeräusch-Modus: Bezugsgröße)
-   * @param noise    bereits gelernte Störgeräusche (für die Bewertung)
-   * @param grinders bereits gelernte Mühlen (Zeiger bleibt gültig, für die Bewertung)
+   * @param profile  aktuelles Pumpenprofil (Bezugsgröße für "würde als Pumpe erkannt")
+   * @param grinders bereits gelernte Mühlen (Zeiger bleibt gültig, für Namen und Liste)
+   * @param noiseCount bereits gelernte Störgeräusche
+   * @param cls      bisherige KI (Zeiger bleibt gültig; was hört sie in der Aufnahme?)
    * @param gain     aktuelle Mikrofon-Verstärkung (wird mit der Aufnahme gespeichert)
    */
-  void start(uint32_t nowMs, TeachMode mode, const DetectorSettings& current,
-             const PumpProfile& profile, const NoiseProfile& noise,
-             const GrinderProfile* grinders, float gain);
+  void start(uint32_t nowMs, TeachMode mode, const DetectorSettings& current, const PumpProfile& profile,
+             const GrinderProfile* grinders, uint8_t noiseCount, const classifier::Classifier* cls, float gain);
 
   /// Bricht ab und kehrt in den Ruhezustand zurück.
   void cancel();
@@ -124,11 +103,8 @@ class TeachController {
   /// Beendet die Aufnahme vorzeitig ("Fertig"); ausgewertet wird im nächsten Frame.
   void finish() { finishRequested_ = true; }
 
-  /**
-   * Verarbeitet einen Audio-Frame (nur in aktiven Phasen wirksam).
-   * @param curve  Rhythmus-Kurve des Frames (FeatureExtractor::acfCurve())
-   */
-  void process(const AudioFrame& f, const float* curve);
+  /// Verarbeitet einen Audio-Frame (nur in aktiven Phasen wirksam).
+  void process(const AudioFrame& f);
 
   TeachPhase phase() const { return phase_; }
   TeachMode mode() const { return mode_; }
@@ -153,12 +129,10 @@ class TeachController {
 
   /// Kurzer Name der Phase (für die Webseite / JSON).
   static const char* phaseName(TeachPhase p);
-  /// Kurzer Name des Modus (JSON: "pump", "noise", "grinder", "background").
+  /// Kurzer Name des Modus (JSON: "pump", "noise", "grinder").
   static const char* modeName(TeachMode m);
   /// Modus aus dem JSON-Namen (unbekannt -> Pumpe).
   static TeachMode modeFromName(const char* name);
-
-
 
   const TeachResult& result() const { return result_; }
 
@@ -178,13 +152,10 @@ class TeachController {
   void finishBackground();
   void analyzePump();
   void analyzeNoise();
+  /// Was hört die bisherige KI in den hörbaren Frames? (füllt clsReady, Treffer je Mühle/Störgeräusch)
+  void classifyRecording(const std::vector<size_t>& active);
   void fail(const char* fmt, ...);
   void clearResult();
-
-  /// Speichert eine Rhythmus-Kurve kompakt als int8 (spart PSRAM).
-  static void storeCurve(int8_t* dst, const float* curve);
-  /// Entpackt eine gespeicherte Rhythmus-Kurve.
-  static void loadCurve(const int8_t* src, float* curve);
 
   TeachMode mode_ = TeachMode::Pump;
   TeachPhase phase_ = TeachPhase::Idle;
@@ -202,15 +173,14 @@ class TeachController {
   // Zustand beim Start (Kopien, da sich die Originale ändern können)
   DetectorSettings settings_;
   PumpProfile currentProfile_;
-  NoiseProfile currentNoise_;
   const GrinderProfile* grinders_ = nullptr;
+  uint8_t noiseCount_ = 0;
+  const classifier::Classifier* classifier_ = nullptr;
 
   // Aufnahmepuffer (PSRAM)
   AudioFrame* bgFrames_ = nullptr;
-  int8_t* bgCurves_ = nullptr;
   size_t bgCount_ = 0;
   AudioFrame* pumpFrames_ = nullptr;
-  int8_t* pumpCurves_ = nullptr;
   size_t pumpCount_ = 0;
 
   TeachResult result_;

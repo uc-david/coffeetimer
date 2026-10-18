@@ -10,8 +10,9 @@
  *
  * Modulübersicht:
  *   audio_features  FFT-Merkmale je Audio-Frame (Pegel, Bandspektrum)
- *   pump_detector   Vergleich mit gelerntem Profil, Ein-/Aus-Entprellung
- *   teach_mode      Lernen des Pumpengeräuschs inkl. Qualitätsbewertung
+ *   classifier      KI-Erkennung: auf dem Gerät trainierter Klassifikator
+ *   pump_detector   Pegel, Gleichmäßigkeit, KI-Entscheidung, Ein-/Aus-Entprellung
+ *   teach_mode      Einlernen von Pumpe, Mühlen, Störgeräuschen inkl. Qualitätsbewertung
  *   shot_timer      Bezugs-Timer und Historie
  *   app             zentrale Logik, Audio-Task, Threadsicherheit
  *   ui              Display und Touch
@@ -22,7 +23,7 @@
  *   vibration       Pumpenerkennung über den Beschleunigungssensor (optional)
  *   datetime        Uhrzeit/Datum, eingebaute RTC (per NTP gestellt)
  *   scale           optionale Bluetooth-Waage (Felicita, Acaia, Bookoo, Decent)
- *   settings        Persistenz im NVS
+ *   settings        Persistenz (Profile im LittleFS, kleine Werte im NVS)
  */
 #include <M5Unified.h>
 
@@ -49,7 +50,7 @@ void setup() {
   datetime::begin();  // Zeitzone, RTC-Zeit wurde von M5.begin() übernommen
   settings::begin();
   ui::begin();
-  app.begin();
+  app().begin();
   vibration::begin();  // Beschleunigungssensor (nur aktiv, wenn als Quelle gewählt)
   scale::begin();  // optionale Waage (Bluetooth nur, wenn eingeschaltet)
 
@@ -65,7 +66,7 @@ void loop() {
   battery::loop();
   vibration::loop();
   datetime::loop();
-  app.loop();  // verzögertes Speichern der Einstellungen
+  app().loop();  // verzögertes Speichern der Einstellungen
   ui::loop();
   net::loop();
   web::loop();
