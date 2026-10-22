@@ -242,8 +242,12 @@ void App::handleGrinder(const AudioFrame& f) {
       doseG_ = NAN;
       doseTareMs_ = f.timestampMs;
     }
-    // Neuer Bezug wird vorbereitet: Timer der Waage auf 0 (steht sonst noch auf dem letzten Bezug)
-    if (sc.syncTimer && scale::connected() && !timer_.running()) scale::timerReset();
+    // Neuer Bezug wird vorbereitet: Bezugszeit (Anzeige, Historie bleibt) und
+    // Timer der Waage auf 0 – sie stehen sonst noch auf dem letzten Bezug.
+    if (!timer_.running()) {
+      timer_.reset();
+      if (sc.syncTimer && scale::connected()) scale::timerReset();
+    }
   }
   grinderWasOn_ = on;
 
